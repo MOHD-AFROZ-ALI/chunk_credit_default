@@ -1,0 +1,3436 @@
+"Chunk 7 Implementation Plan: Batch Processing Component
+Objective: Create a CSV upload interface with progress tracking and summary analytics for batch credit risk assessment.
+
+Key Components:
+
+File upload configuration and validation
+CSV processing pipeline with progress tracking
+Batch prediction engine with parallel processing
+Results export and download functionality
+Summary analytics and reporting" 
+
+
+# Chunk 7: Batch Processing Component for Credit Default Prediction
+# Building upon the foundation from Chunks 1-6 with consistent design patterns
+
+import os
+import pandas as pd
+import numpy as np
+import json
+import asyncio
+from datetime import datetime
+from pathlib import Path
+import logging
+from typing import Dict, List, Any, Optional, Tuple
+import matplotlib.pyplot as plt
+import seaborn as sns
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+import warnings
+warnings.filterwarnings('ignore')
+
+# Ensure output directory exists
+output_dir = Path('/home/user/output')
+output_dir.mkdir(exist_ok=True)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Configure matplotlib for better visualization
+plt.rcParams['font.family'] = ['Arial', 'DejaVu Sans', 'Liberation Sans', 'sans-serif']
+plt.rcParams['figure.dpi'] = 100
+plt.rcParams['savefig.dpi'] = 300
+
+print("🚀 Chunk 7: Batch Processing Component - Initialization Complete")
+print(f"📁 Output directory: {output_dir}")
+
+# =============================================================================
+# Cell 7.1: Batch Upload Configuration and File Management (5 functions)
+# =============================================================================
+
+def configure_batch_upload_settings(max_file_size_mb: int = 100, 
+                                   supported_formats: List[str] = None,
+                                   chunk_size: int = 10000) -> Dict[str, Any]:
+    """
+    Configure batch upload settings and validation parameters.
+    
+    Args:
+        max_file_size_mb: Maximum file size in MB
+        supported_formats: List of supported file formats
+        chunk_size: Number of records to process in each chunk
+    
+    Returns:
+        Dictionary containing upload configuration
+    """
+    try:
+        if supported_formats is None:
+            supported_formats = ['csv', 'xlsx', 'xls', 'json']
+        
+        config = {
+            'max_file_size_mb': max_file_size_mb,
+            'max_file_size_bytes': max_file_size_mb * 1024 * 1024,
+            'supported_formats': supported_formats,
+            'chunk_size': chunk_size,
+            'upload_directory': str(output_dir / 'batch_uploads'),
+            'temp_directory': str(output_dir / 'temp'),
+            'results_directory': str(output_dir / 'batch_results'),
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Create necessary directories
+        for directory in [config['upload_directory'], config['temp_directory'], config['results_directory']]:
+            Path(directory).mkdir(parents=True, exist_ok=True)
+        
+        # Save configuration
+        with open(output_dir / 'batch_config.json', 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        logger.info(f"Batch upload configuration created: {config}")
+        return config
+        
+    except Exception as e:
+        logger.error(f"Error configuring batch upload settings: {e}")
+        return {}
+
+def validate_upload_file(file_path: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Validate uploaded file against configuration requirements.
+    
+    Args:
+        file_path: Path to the uploaded file
+        config: Upload configuration dictionary
+    
+    Returns:
+        Validation result dictionary
+    """
+    try:
+        file_path = Path(file_path)
+        validation_result = {
+            'is_valid': False,
+            'file_path': str(file_path),
+            'file_name': file_path.name,
+            'file_size_mb': 0,
+            'file_format': '',
+            'errors': [],
+            'warnings': [],
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Check if file exists
+        if not file_path.exists():
+            validation_result['errors'].append(f"File does not exist: {file_path}")
+            return validation_result
+        
+        # Check file size
+        file_size_bytes = file_path.stat().st_size
+        file_size_mb = file_size_bytes / (1024 * 1024)
+        validation_result['file_size_mb'] = round(file_size_mb, 2)
+        
+        if file_size_bytes > config.get('max_file_size_bytes', 100 * 1024 * 1024):
+            validation_result['errors'].append(f"File size ({file_size_mb:.2f} MB) exceeds maximum ({config.get('max_file_size_mb', 100)} MB)")
+        
+        # Check file format
+        file_format = file_path.suffix.lower().lstrip('.')
+        validation_result['file_format'] = file_format
+        
+        if file_format not in config.get('supported_formats', ['csv', 'xlsx']):
+            validation_result['errors'].append(f"Unsupported file format: {file_format}")
+        
+        # Set validation status
+        validation_result['is_valid'] = len(validation_result['errors']) == 0
+        
+        logger.info(f"File validation completed: {validation_result['file_name']} - Valid: {validation_result['is_valid']}")
+        return validation_result
+        
+    except Exception as e:
+        logger.error(f"Error validating upload file: {e}")
+        return {'is_valid': False, 'errors': [str(e)]}
+
+def create_upload_progress_tracker(total_files: int = 1) -> Dict[str, Any]:
+    """
+    Create a progress tracker for batch upload operations.
+    
+    Args:
+        total_files: Total number of files to process
+    
+    Returns:
+        Progress tracker dictionary
+    """
+    try:
+        tracker = {
+            'session_id': datetime.now().strftime("%Y%m%d_%H%M%S"),
+            'total_files': total_files,
+            'processed_files': 0,
+            'successful_files': 0,
+            'failed_files': 0,
+            'current_file': '',
+            'progress_percentage': 0.0,
+            'start_time': datetime.now().isoformat(),
+            'estimated_completion': None,
+            'file_details': [],
+            'errors': [],
+            'status': 'initialized'
+        }
+        
+        # Save initial tracker
+        tracker_path = output_dir / f"upload_progress_{tracker['session_id']}.json"
+        with open(tracker_path, 'w') as f:
+            json.dump(tracker, f, indent=2)
+        
+        logger.info(f"Upload progress tracker created: {tracker['session_id']}")
+        return tracker
+        
+    except Exception as e:
+        logger.error(f"Error creating upload progress tracker: {e}")
+        return {}
+
+def manage_batch_file_storage(file_data: pd.DataFrame, 
+                            file_name: str,
+                            storage_config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Manage storage and organization of batch uploaded files.
+    
+    Args:
+        file_data: DataFrame containing the uploaded data
+        file_name: Original file name
+        storage_config: Storage configuration settings
+    
+    Returns:
+        Storage management result
+    """
+    try:
+        session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        storage_result = {
+            'session_id': session_id,
+            'original_filename': file_name,
+            'stored_files': {},
+            'metadata': {
+                'rows': len(file_data),
+                'columns': len(file_data.columns),
+                'column_names': list(file_data.columns),
+                'data_types': file_data.dtypes.to_dict(),
+                'memory_usage_mb': file_data.memory_usage(deep=True).sum() / (1024 * 1024)
+            },
+            'storage_paths': {},
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Create session directory
+        session_dir = Path(storage_config.get('upload_directory', output_dir)) / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Store original data
+        original_path = session_dir / f"original_{file_name}"
+        if file_name.endswith('.csv'):
+            file_data.to_csv(original_path, index=False)
+        else:
+            file_data.to_excel(original_path, index=False)
+        
+        storage_result['storage_paths']['original'] = str(original_path)
+        
+        # Store processed chunks if data is large
+        chunk_size = storage_config.get('chunk_size', 10000)
+        if len(file_data) > chunk_size:
+            chunks_dir = session_dir / 'chunks'
+            chunks_dir.mkdir(exist_ok=True)
+            
+            for i, chunk in enumerate(np.array_split(file_data, len(file_data) // chunk_size + 1)):
+                chunk_path = chunks_dir / f"chunk_{i:03d}.csv"
+                chunk.to_csv(chunk_path, index=False)
+                storage_result['stored_files'][f'chunk_{i:03d}'] = str(chunk_path)
+        
+        # Save metadata
+        metadata_path = session_dir / 'metadata.json'
+        with open(metadata_path, 'w') as f:
+            json.dump(storage_result, f, indent=2, default=str)
+        
+        storage_result['storage_paths']['metadata'] = str(metadata_path)
+        
+        logger.info(f"Batch file storage completed: {session_id}")
+        return storage_result
+        
+    except Exception as e:
+        logger.error(f"Error managing batch file storage: {e}")
+        return {'error': str(e)}
+
+def cleanup_batch_temp_files(session_id: str, keep_results: bool = True) -> Dict[str, Any]:
+    """
+    Clean up temporary files from batch processing operations.
+    
+    Args:
+        session_id: Session identifier for cleanup
+        keep_results: Whether to keep result files
+    
+    Returns:
+        Cleanup operation result
+    """
+    try:
+        cleanup_result = {
+            'session_id': session_id,
+            'files_deleted': [],
+            'files_kept': [],
+            'directories_removed': [],
+            'cleanup_timestamp': datetime.now().isoformat(),
+            'total_space_freed_mb': 0
+        }
+        
+        # Find session directories
+        temp_dir = Path(output_dir) / 'temp'
+        upload_dir = Path(output_dir) / 'batch_uploads' / session_id
+        
+        space_freed = 0
+        
+        # Clean temporary files
+        if temp_dir.exists():
+            for temp_file in temp_dir.glob(f"*{session_id}*"):
+                if temp_file.is_file():
+                    file_size = temp_file.stat().st_size
+                    temp_file.unlink()
+                    cleanup_result['files_deleted'].append(str(temp_file))
+                    space_freed += file_size
+        
+        # Clean upload directory if not keeping results
+        if upload_dir.exists() and not keep_results:
+            for file_path in upload_dir.rglob('*'):
+                if file_path.is_file():
+                    file_size = file_path.stat().st_size
+                    file_path.unlink()
+                    cleanup_result['files_deleted'].append(str(file_path))
+                    space_freed += file_size
+            
+            # Remove empty directories
+            for dir_path in sorted(upload_dir.rglob('*'), key=lambda x: len(str(x)), reverse=True):
+                if dir_path.is_dir() and not any(dir_path.iterdir()):
+                    dir_path.rmdir()
+                    cleanup_result['directories_removed'].append(str(dir_path))
+        
+        cleanup_result['total_space_freed_mb'] = round(space_freed / (1024 * 1024), 2)
+        
+        logger.info(f"Cleanup completed for session {session_id}: {cleanup_result['total_space_freed_mb']} MB freed")
+        return cleanup_result
+        
+    except Exception as e:
+        logger.error(f"Error cleaning up batch temp files: {e}")
+        return {'error': str(e)}
+
+# Test Cell 7.1 functions
+print("\n" + "="*50)
+print("Testing Cell 7.1: Batch Upload Configuration")
+print("="*50)
+
+# Test configuration
+config = configure_batch_upload_settings(max_file_size_mb=50, chunk_size=5000)
+print(f"✅ Configuration created: {len(config)} settings")
+
+# Create sample data for testing
+sample_data = pd.DataFrame({
+    'feature_1': np.random.randn(1000),
+    'feature_2': np.random.randn(1000),
+    'target': np.random.choice([0, 1], 1000)
+})
+
+# Save sample file for testing
+sample_file_path = output_dir / 'sample_batch_data.csv'
+sample_data.to_csv(sample_file_path, index=False)
+
+# Test file validation
+validation_result = validate_upload_file(str(sample_file_path), config)
+print(f"✅ File validation: {'Valid' if validation_result['is_valid'] else 'Invalid'}")
+
+# Test progress tracker
+tracker = create_upload_progress_tracker(total_files=3)
+print(f"✅ Progress tracker created: {tracker['session_id']}")
+
+# Test file storage management
+storage_result = manage_batch_file_storage(sample_data, 'sample_batch_data.csv', config)
+print(f"✅ File storage managed: {storage_result['metadata']['rows']} rows stored")
+
+print("✅ Cell 7.1 completed successfully!")
+
+# =============================================================================
+# Cell 7.2: Batch Data Validation and Processing (5 functions)
+# =============================================================================
+
+def validate_batch_data_schema(data: pd.DataFrame, 
+                             expected_schema: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Validate batch data against expected schema for credit default prediction.
+    
+    Args:
+        data: Input DataFrame to validate
+        expected_schema: Expected schema definition
+    
+    Returns:
+        Schema validation result
+    """
+    try:
+        validation_result = {
+            'is_valid': False,
+            'schema_matches': {},
+            'missing_columns': [],
+            'extra_columns': [],
+            'type_mismatches': [],
+            'value_range_issues': [],
+            'data_quality_score': 0.0,
+            'recommendations': [],
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Default UCI Credit Default Dataset schema
+        if not expected_schema:
+            expected_schema = {
+                'required_columns': [
+                    'LIMIT_BAL', 'SEX', 'EDUCATION', 'MARRIAGE', 'AGE',
+                    'PAY_0', 'PAY_2', 'PAY_3', 'PAY_4', 'PAY_5', 'PAY_6',
+                    'BILL_AMT1', 'BILL_AMT2', 'BILL_AMT3', 'BILL_AMT4', 'BILL_AMT5', 'BILL_AMT6',
+                    'PAY_AMT1', 'PAY_AMT2', 'PAY_AMT3', 'PAY_AMT4', 'PAY_AMT5', 'PAY_AMT6'
+                ],
+                'optional_columns': ['default.payment.next.month', 'ID'],
+                'numeric_columns': ['LIMIT_BAL', 'AGE'] + [f'BILL_AMT{i}' for i in range(1, 7)] + [f'PAY_AMT{i}' for i in range(1, 7)],
+                'categorical_columns': ['SEX', 'EDUCATION', 'MARRIAGE'] + [f'PAY_{i}' for i in [0, 2, 3, 4, 5, 6]]
+            }
+        
+        # Check required columns
+        data_columns = set(data.columns)
+        required_columns = set(expected_schema.get('required_columns', []))
+        optional_columns = set(expected_schema.get('optional_columns', []))
+        
+        validation_result['missing_columns'] = list(required_columns - data_columns)
+        validation_result['extra_columns'] = list(data_columns - required_columns - optional_columns)
+        
+        # Check data types
+        numeric_cols = expected_schema.get('numeric_columns', [])
+        for col in numeric_cols:
+            if col in data.columns and not pd.api.types.is_numeric_dtype(data[col]):
+                validation_result['type_mismatches'].append({
+                    'column': col,
+                    'expected': 'numeric',
+                    'actual': str(data[col].dtype)
+                })
+        
+        # Check value ranges for key columns
+        if 'AGE' in data.columns:
+            age_issues = data[(data['AGE'] < 18) | (data['AGE'] > 100)]
+            if len(age_issues) > 0:
+                validation_result['value_range_issues'].append({
+                    'column': 'AGE',
+                    'issue': f'{len(age_issues)} records with age outside 18-100 range'
+                })
+        
+        if 'SEX' in data.columns:
+            sex_values = data['SEX'].unique()
+            if not all(val in [1, 2] for val in sex_values if pd.notna(val)):
+                validation_result['value_range_issues'].append({
+                    'column': 'SEX',
+                    'issue': f'Invalid SEX values found: {sex_values}'
+                })
+        
+        # Calculate data quality score
+        quality_factors = []
+        quality_factors.append(1.0 if len(validation_result['missing_columns']) == 0 else 0.5)
+        quality_factors.append(1.0 if len(validation_result['type_mismatches']) == 0 else 0.7)
+        quality_factors.append(1.0 if len(validation_result['value_range_issues']) == 0 else 0.8)
+        quality_factors.append(1.0 if data.isnull().sum().sum() / (len(data) * len(data.columns)) < 0.1 else 0.6)
+        
+        validation_result['data_quality_score'] = np.mean(quality_factors)
+        validation_result['is_valid'] = validation_result['data_quality_score'] >= 0.8
+        
+        # Generate recommendations
+        if validation_result['missing_columns']:
+            validation_result['recommendations'].append(f"Add missing columns: {validation_result['missing_columns']}")
+        if validation_result['type_mismatches']:
+            validation_result['recommendations'].append("Convert data types for numeric columns")
+        if validation_result['value_range_issues']:
+            validation_result['recommendations'].append("Review and clean value ranges")
+        
+        logger.info(f"Schema validation completed: Quality score {validation_result['data_quality_score']:.2f}")
+        return validation_result
+        
+    except Exception as e:
+        logger.error(f"Error validating batch data schema: {e}")
+        return {'is_valid': False, 'error': str(e)}
+
+def preprocess_batch_data(data: pd.DataFrame, 
+                         preprocessing_config: Dict[str, Any] = None) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Preprocess batch data for credit default prediction model.
+    
+    Args:
+        data: Input DataFrame to preprocess
+        preprocessing_config: Configuration for preprocessing steps
+    
+    Returns:
+        Tuple of (processed_data, preprocessing_report)
+    """
+    try:
+        if preprocessing_config is None:
+            preprocessing_config = {
+                'handle_missing': True,
+                'normalize_numeric': True,
+                'encode_categorical': True,
+                'remove_outliers': True,
+                'outlier_threshold': 3.0
+            }
+        
+        preprocessing_report = {
+            'original_shape': data.shape,
+            'steps_applied': [],
+            'missing_data_handled': {},
+            'outliers_removed': 0,
+            'features_normalized': [],
+            'features_encoded': [],
+            'final_shape': None,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        processed_data = data.copy()
+        
+        # Handle missing values
+        if preprocessing_config.get('handle_missing', True):
+            missing_before = processed_data.isnull().sum().sum()
+            
+            # Fill numeric columns with median
+            numeric_cols = processed_data.select_dtypes(include=[np.number]).columns
+            for col in numeric_cols:
+                if processed_data[col].isnull().any():
+                    median_val = processed_data[col].median()
+                    processed_data[col].fillna(median_val, inplace=True)
+                    preprocessing_report['missing_data_handled'][col] = f'filled with median: {median_val}'
+            
+            # Fill categorical columns with mode
+            categorical_cols = processed_data.select_dtypes(include=['object', 'category']).columns
+            for col in categorical_cols:
+                if processed_data[col].isnull().any():
+                    mode_val = processed_data[col].mode().iloc[0] if not processed_data[col].mode().empty else 'Unknown'
+                    processed_data[col].fillna(mode_val, inplace=True)
+                    preprocessing_report['missing_data_handled'][col] = f'filled with mode: {mode_val}'
+            
+            missing_after = processed_data.isnull().sum().sum()
+            preprocessing_report['steps_applied'].append(f'Missing data: {missing_before} → {missing_after}')
+        
+        # Remove outliers using IQR method
+        if preprocessing_config.get('remove_outliers', True):
+            outlier_threshold = preprocessing_config.get('outlier_threshold', 3.0)
+            numeric_cols = processed_data.select_dtypes(include=[np.number]).columns
+            
+            outliers_removed = 0
+            for col in numeric_cols:
+                Q1 = processed_data[col].quantile(0.25)
+                Q3 = processed_data[col].quantile(0.75)
+                IQR = Q3 - Q1
+                lower_bound = Q1 - outlier_threshold * IQR
+                upper_bound = Q3 + outlier_threshold * IQR
+                
+                outlier_mask = (processed_data[col] < lower_bound) | (processed_data[col] > upper_bound)
+                outliers_in_col = outlier_mask.sum()
+                
+                if outliers_in_col > 0:
+                    processed_data = processed_data[~outlier_mask]
+                    outliers_removed += outliers_in_col
+            
+            preprocessing_report['outliers_removed'] = outliers_removed
+            preprocessing_report['steps_applied'].append(f'Outliers removed: {outliers_removed}')
+        
+        # Normalize numeric features
+        if preprocessing_config.get('normalize_numeric', True):
+            from sklearn.preprocessing import StandardScaler
+            
+            numeric_cols = processed_data.select_dtypes(include=[np.number]).columns
+            # Exclude target column if present
+            target_cols = ['default.payment.next.month', 'target', 'DEFAULT']
+            numeric_cols = [col for col in numeric_cols if col not in target_cols]
+            
+            if len(numeric_cols) > 0:
+                scaler = StandardScaler()
+                processed_data[numeric_cols] = scaler.fit_transform(processed_data[numeric_cols])
+                preprocessing_report['features_normalized'] = list(numeric_cols)
+                preprocessing_report['steps_applied'].append(f'Normalized {len(numeric_cols)} numeric features')
+        
+        # Encode categorical features
+        if preprocessing_config.get('encode_categorical', True):
+            categorical_cols = processed_data.select_dtypes(include=['object', 'category']).columns
+            
+            for col in categorical_cols:
+                if processed_data[col].nunique() <= 10:  # One-hot encode low cardinality
+                    dummies = pd.get_dummies(processed_data[col], prefix=col, drop_first=True)
+                    processed_data = pd.concat([processed_data.drop(col, axis=1), dummies], axis=1)
+                    preprocessing_report['features_encoded'].append(f'{col}: one-hot encoded')
+                else:  # Label encode high cardinality
+                    from sklearn.preprocessing import LabelEncoder
+                    le = LabelEncoder()
+                    processed_data[col] = le.fit_transform(processed_data[col].astype(str))
+                    preprocessing_report['features_encoded'].append(f'{col}: label encoded')
+            
+            preprocessing_report['steps_applied'].append(f'Encoded {len(categorical_cols)} categorical features')
+        
+        preprocessing_report['final_shape'] = processed_data.shape
+        
+        logger.info(f"Batch preprocessing completed: {preprocessing_report['original_shape']} → {preprocessing_report['final_shape']}")
+        return processed_data, preprocessing_report
+        
+    except Exception as e:
+        logger.error(f"Error preprocessing batch data: {e}")
+        return data, {'error': str(e)}
+
+def split_batch_into_chunks(data: pd.DataFrame, 
+                          chunk_size: int = 1000,
+                          overlap_size: int = 0) -> List[Dict[str, Any]]:
+    """
+    Split large batch data into manageable chunks for processing.
+    
+    Args:
+        data: Input DataFrame to split
+        chunk_size: Size of each chunk
+        overlap_size: Number of overlapping rows between chunks
+    
+    Returns:
+        List of chunk dictionaries with metadata
+    """
+    try:
+        chunks = []
+        total_rows = len(data)
+        
+        if total_rows <= chunk_size:
+            # Data is small enough to process as single chunk
+            chunks.append({
+                'chunk_id': 0,
+                'data': data,
+                'start_idx': 0,
+                'end_idx': total_rows - 1,
+                'size': total_rows,
+                'overlap_start': 0,
+                'overlap_end': 0
+            })
+        else:
+            # Split into multiple chunks
+            chunk_id = 0
+            start_idx = 0
+            
+            while start_idx < total_rows:
+                end_idx = min(start_idx + chunk_size, total_rows)
+                
+                # Add overlap from previous chunk
+                actual_start = max(0, start_idx - overlap_size) if chunk_id > 0 else start_idx
+                chunk_data = data.iloc[actual_start:end_idx].copy()
+                
+                chunk_info = {
+                    'chunk_id': chunk_id,
+                    'data': chunk_data,
+                    'start_idx': start_idx,
+                    'end_idx': end_idx - 1,
+                    'size': len(chunk_data),
+                    'overlap_start': start_idx - actual_start if chunk_id > 0 else 0,
+                    'overlap_end': min(overlap_size, total_rows - end_idx) if end_idx < total_rows else 0,
+                    'is_final_chunk': end_idx >= total_rows
+                }
+                
+                chunks.append(chunk_info)
+                chunk_id += 1
+                start_idx = end_idx
+        
+        # Add summary metadata
+        chunk_summary = {
+            'total_chunks': len(chunks),
+            'total_rows': total_rows,
+            'chunk_size': chunk_size,
+            'overlap_size': overlap_size,
+            'avg_chunk_size': np.mean([chunk['size'] for chunk in chunks]),
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Save chunk metadata
+        with open(output_dir / 'batch_chunks_metadata.json', 'w') as f:
+            json.dump(chunk_summary, f, indent=2)
+        
+        logger.info(f"Data split into {len(chunks)} chunks (avg size: {chunk_summary['avg_chunk_size']:.0f})")
+        return chunks
+        
+    except Exception as e:
+        logger.error(f"Error splitting batch into chunks: {e}")
+        return []
+
+
+
+def validate_chunk_consistency(chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Validate consistency across data chunks for batch processing.
+    
+    Args:
+        chunks: List of chunk dictionaries
+    
+    Returns:
+        Consistency validation result
+    """
+    try:
+        consistency_report = {
+            'is_consistent': True,
+            'total_chunks': len(chunks),
+            'schema_consistency': {},
+            'data_type_consistency': {},
+            'value_range_consistency': {},
+            'missing_data_patterns': {},
+            'recommendations': [],
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        if not chunks:
+            consistency_report['is_consistent'] = False
+            consistency_report['recommendations'].append("No chunks provided for validation")
+            return consistency_report
+        
+        # Check schema consistency
+        reference_columns = set(chunks[0]['data'].columns)
+        schema_issues = []
+        
+        for i, chunk in enumerate(chunks):
+            chunk_columns = set(chunk['data'].columns)
+            if chunk_columns != reference_columns:
+                missing_cols = reference_columns - chunk_columns
+                extra_cols = chunk_columns - reference_columns
+                schema_issues.append({
+                    'chunk_id': i,
+                    'missing_columns': list(missing_cols),
+                    'extra_columns': list(extra_cols)
+                })
+        
+        consistency_report['schema_consistency'] = {
+            'is_consistent': len(schema_issues) == 0,
+            'issues': schema_issues
+        }
+        
+        # Check data type consistency
+        reference_dtypes = chunks[0]['data'].dtypes.to_dict()
+        dtype_issues = []
+        
+        for i, chunk in enumerate(chunks):
+            chunk_dtypes = chunk['data'].dtypes.to_dict()
+            for col in reference_columns:
+                if col in chunk_dtypes and str(reference_dtypes.get(col)) != str(chunk_dtypes[col]):
+                    dtype_issues.append({
+                        'chunk_id': i,
+                        'column': col,
+                        'expected_type': str(reference_dtypes[col]),
+                        'actual_type': str(chunk_dtypes[col])
+                    })
+        
+        consistency_report['data_type_consistency'] = {
+            'is_consistent': len(dtype_issues) == 0,
+            'issues': dtype_issues
+        }
+        
+        # Check value range consistency for numeric columns
+        numeric_cols = chunks[0]['data'].select_dtypes(include=[np.number]).columns
+        range_issues = []
+        
+        for col in numeric_cols:
+            col_ranges = []
+            for chunk in chunks:
+                if col in chunk['data'].columns:
+                    col_data = chunk['data'][col].dropna()
+                    if len(col_data) > 0:
+                        col_ranges.append({
+                            'min': col_data.min(),
+                            'max': col_data.max(),
+                            'mean': col_data.mean(),
+                            'std': col_data.std()
+                        })
+            
+            if col_ranges:
+                min_vals = [r['min'] for r in col_ranges]
+                max_vals = [r['max'] for r in col_ranges]
+                mean_vals = [r['mean'] for r in col_ranges]
+                
+                # Check for significant range differences
+                if len(mean_vals) > 1 and np.std(mean_vals) > 0:
+                    range_variation = (max(max_vals) - min(min_vals)) / np.mean(mean_vals)
+                    if range_variation > 2.0:  # More than 200% variation
+                        range_issues.append({
+                            'column': col,
+                            'issue': f'High range variation: {range_variation:.2f}',
+                            'min_across_chunks': min(min_vals),
+                            'max_across_chunks': max(max_vals)
+                        })
+        
+        consistency_report['value_range_consistency'] = {
+            'is_consistent': len(range_issues) == 0,
+            'issues': range_issues
+        }
+        
+        # Check missing data patterns
+        missing_patterns = {}
+        for i, chunk in enumerate(chunks):
+            chunk_missing = chunk['data'].isnull().sum().to_dict()
+            missing_patterns[f'chunk_{i}'] = {
+                col: count for col, count in chunk_missing.items() if count > 0
+            }
+        
+        consistency_report['missing_data_patterns'] = missing_patterns
+        
+        # Overall consistency assessment
+        consistency_factors = [
+            consistency_report['schema_consistency']['is_consistent'],
+            consistency_report['data_type_consistency']['is_consistent'],
+            consistency_report['value_range_consistency']['is_consistent']
+        ]
+        
+        consistency_report['is_consistent'] = all(consistency_factors)
+        
+        # Generate recommendations
+        if not consistency_report['schema_consistency']['is_consistent']:
+            consistency_report['recommendations'].append("Standardize column schemas across all chunks")
+        if not consistency_report['data_type_consistency']['is_consistent']:
+            consistency_report['recommendations'].append("Ensure consistent data types across chunks")
+        if not consistency_report['value_range_consistency']['is_consistent']:
+            consistency_report['recommendations'].append("Review data for outliers or processing inconsistencies")
+        
+        logger.info(f"Chunk consistency validation completed: {'Consistent' if consistency_report['is_consistent'] else 'Issues found'}")
+        return consistency_report
+        
+    except Exception as e:
+        logger.error(f"Error validating chunk consistency: {e}")
+        return {'is_consistent': False, 'error': str(e)}
+
+def create_batch_processing_pipeline(data: pd.DataFrame,
+                                   pipeline_config: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Create a comprehensive batch processing pipeline for credit default data.
+    
+    Args:
+        data: Input DataFrame to process
+        pipeline_config: Configuration for processing pipeline
+    
+    Returns:
+        Pipeline execution result
+    """
+    try:
+        if pipeline_config is None:
+            pipeline_config = {
+                'validation_enabled': True,
+                'preprocessing_enabled': True,
+                'chunking_enabled': True,
+                'chunk_size': 5000,
+                'parallel_processing': True,
+                'max_workers': 4,
+                'save_intermediate': True
+            }
+        
+        pipeline_result = {
+            'pipeline_id': datetime.now().strftime("%Y%m%d_%H%M%S"),
+            'input_shape': data.shape,
+            'stages_completed': [],
+            'processing_time': {},
+            'intermediate_files': [],
+            'final_output': None,
+            'errors': [],
+            'warnings': [],
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        start_time = datetime.now()
+        
+        # Stage 1: Data Validation
+        if pipeline_config.get('validation_enabled', True):
+            stage_start = datetime.now()
+            validation_result = validate_batch_data_schema(data, {})
+            
+            pipeline_result['stages_completed'].append({
+                'stage': 'validation',
+                'status': 'completed' if validation_result['is_valid'] else 'completed_with_warnings',
+                'quality_score': validation_result.get('data_quality_score', 0.0),
+                'duration_seconds': (datetime.now() - stage_start).total_seconds()
+            })
+            
+            if not validation_result['is_valid']:
+                pipeline_result['warnings'].extend(validation_result.get('recommendations', []))
+        
+        # Stage 2: Data Preprocessing
+        if pipeline_config.get('preprocessing_enabled', True):
+            stage_start = datetime.now()
+            processed_data, preprocessing_report = preprocess_batch_data(data, {})
+            
+            pipeline_result['stages_completed'].append({
+                'stage': 'preprocessing',
+                'status': 'completed',
+                'original_shape': preprocessing_report.get('original_shape'),
+                'final_shape': preprocessing_report.get('final_shape'),
+                'duration_seconds': (datetime.now() - stage_start).total_seconds()
+            })
+            
+            # Save intermediate results if configured
+            if pipeline_config.get('save_intermediate', True):
+                intermediate_path = output_dir / f"preprocessed_data_{pipeline_result['pipeline_id']}.csv"
+                processed_data.to_csv(intermediate_path, index=False)
+                pipeline_result['intermediate_files'].append(str(intermediate_path))
+        else:
+            processed_data = data
+        
+        # Stage 3: Data Chunking
+        if pipeline_config.get('chunking_enabled', True) and len(processed_data) > pipeline_config.get('chunk_size', 5000):
+            stage_start = datetime.now()
+            chunks = split_batch_into_chunks(
+                processed_data, 
+                chunk_size=pipeline_config.get('chunk_size', 5000)
+            )
+            
+            pipeline_result['stages_completed'].append({
+                'stage': 'chunking',
+                'status': 'completed',
+                'total_chunks': len(chunks),
+                'avg_chunk_size': np.mean([chunk['size'] for chunk in chunks]),
+                'duration_seconds': (datetime.now() - stage_start).total_seconds()
+            })
+            
+            # Stage 4: Chunk Consistency Validation
+            stage_start = datetime.now()
+            consistency_result = validate_chunk_consistency(chunks)
+            
+            pipeline_result['stages_completed'].append({
+                'stage': 'consistency_validation',
+                'status': 'completed' if consistency_result['is_consistent'] else 'completed_with_warnings',
+                'is_consistent': consistency_result['is_consistent'],
+                'duration_seconds': (datetime.now() - stage_start).total_seconds()
+            })
+            
+            if not consistency_result['is_consistent']:
+                pipeline_result['warnings'].extend(consistency_result.get('recommendations', []))
+        
+        # Final processing time
+        total_time = (datetime.now() - start_time).total_seconds()
+        pipeline_result['processing_time']['total_seconds'] = total_time
+        pipeline_result['final_output'] = {
+            'processed_data_shape': processed_data.shape,
+            'chunks_created': len(chunks) if 'chunks' in locals() else 0,
+            'ready_for_prediction': True
+        }
+        
+        # Save pipeline report
+        pipeline_report_path = output_dir / f"pipeline_report_{pipeline_result['pipeline_id']}.json"
+        with open(pipeline_report_path, 'w') as f:
+            json.dump(pipeline_result, f, indent=2, default=str)
+        
+        logger.info(f"Batch processing pipeline completed: {total_time:.2f} seconds")
+        return pipeline_result
+        
+    except Exception as e:
+        logger.error(f"Error in batch processing pipeline: {e}")
+        return {'error': str(e), 'pipeline_id': datetime.now().strftime("%Y%m%d_%H%M%S")}
+
+# Test Cell 7.2 functions
+print("\n" + "="*50)
+print("Testing Cell 7.2: Batch Data Validation and Processing")
+print("="*50)
+
+# Create more comprehensive test data
+test_data = pd.DataFrame({
+    'LIMIT_BAL': np.random.randint(10000, 500000, 2000),
+    'SEX': np.random.choice([1, 2], 2000),
+    'EDUCATION': np.random.choice([1, 2, 3, 4], 2000),
+    'MARRIAGE': np.random.choice([1, 2, 3], 2000),
+    'AGE': np.random.randint(21, 70, 2000),
+    'PAY_0': np.random.choice([-1, 0, 1, 2, 3], 2000),
+    'BILL_AMT1': np.random.randint(0, 100000, 2000),
+    'PAY_AMT1': np.random.randint(0, 50000, 2000),
+    'default.payment.next.month': np.random.choice([0, 1], 2000)
+})
+
+# Add some missing values for testing
+test_data.loc[np.random.choice(test_data.index, 50), 'EDUCATION'] = np.nan
+test_data.loc[np.random.choice(test_data.index, 30), 'BILL_AMT1'] = np.nan
+
+# Test schema validation
+schema_result = validate_batch_data_schema(test_data, {})
+print(f"✅ Schema validation: Quality score {schema_result['data_quality_score']:.2f}")
+
+# Test data preprocessing
+processed_data, preprocess_report = preprocess_batch_data(test_data)
+print(f"✅ Data preprocessing: {preprocess_report['original_shape']} → {preprocess_report['final_shape']}")
+
+# Test data chunking
+chunks = split_batch_into_chunks(processed_data, chunk_size=500)
+print(f"✅ Data chunking: {len(chunks)} chunks created")
+
+# Test chunk consistency
+consistency_result = validate_chunk_consistency(chunks)
+print(f"✅ Chunk consistency: {'Consistent' if consistency_result['is_consistent'] else 'Issues found'}")
+
+# Test complete pipeline
+pipeline_result = create_batch_processing_pipeline(test_data)
+print(f"✅ Processing pipeline: {len(pipeline_result['stages_completed'])} stages completed")
+
+print("✅ Cell 7.2 completed successfully!")
+
+# =============================================================================
+# Cell 7.3: Batch Prediction Engine (5 functions)
+# =============================================================================
+
+def initialize_batch_prediction_model(model_config: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Initialize the batch prediction model for credit default prediction.
+    
+    Args:
+        model_config: Configuration for model initialization
+    
+    Returns:
+        Model initialization result
+    """
+    try:
+        if model_config is None:
+            model_config = {
+                'model_type': 'random_forest',
+                'n_estimators': 100,
+                'max_depth': 10,
+                'random_state': 42,
+                'enable_shap': True,
+                'cross_validation': True,
+                'cv_folds': 5
+            }
+        
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.model_selection import cross_val_score
+        from sklearn.metrics import classification_report, confusion_matrix
+        
+        model_result = {
+            'model_id': datetime.now().strftime("%Y%m%d_%H%M%S"),
+            'model_type': model_config.get('model_type', 'random_forest'),
+            'model_parameters': model_config,
+            'model_object': None,
+            'training_metrics': {},
+            'feature_importance': {},
+            'shap_explainer': None,
+            'is_trained': False,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Initialize model based on type
+        if model_config.get('model_type') == 'random_forest':
+            model = RandomForestClassifier(
+                n_estimators=model_config.get('n_estimators', 100),
+                max_depth=model_config.get('max_depth', 10),
+                random_state=model_config.get('random_state', 42),
+                n_jobs=-1
+            )
+        else:
+            # Default to Random Forest
+            model = RandomForestClassifier(
+                n_estimators=100,
+                max_depth=10,
+                random_state=42,
+                n_jobs=-1
+            )
+        
+        model_result['model_object'] = model
+        
+        # Initialize SHAP explainer if enabled
+        if model_config.get('enable_shap', True):
+            try:
+                import shap
+                model_result['shap_enabled'] = True
+            except ImportError:
+                model_result['shap_enabled'] = False
+                model_result['warnings'] = ['SHAP not available - install with: pip install shap']
+        
+        # Save model configuration
+        model_config_path = output_dir / f"model_config_{model_result['model_id']}.json"
+        with open(model_config_path, 'w') as f:
+            json.dump({k: v for k, v in model_result.items() if k != 'model_object'}, f, indent=2, default=str)
+        
+        logger.info(f"Batch prediction model initialized: {model_result['model_id']}")
+        return model_result
+        
+    except Exception as e:
+        logger.error(f"Error initializing batch prediction model: {e}")
+        return {'error': str(e)}
+
+def train_batch_prediction_model(model_result: Dict[str, Any], 
+                               training_data: pd.DataFrame,
+                               target_column: str = 'default.payment.next.month') -> Dict[str, Any]:
+    """
+    Train the batch prediction model on provided training data.
+    
+    Args:
+        model_result: Model initialization result
+        training_data: Training dataset
+        target_column: Name of target column
+    
+    Returns:
+        Training result with metrics
+    """
+    try:
+        from sklearn.model_selection import train_test_split, cross_val_score
+        from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+        
+        training_result = {
+            'model_id': model_result.get('model_id'),
+            'training_completed': False,
+            'training_data_shape': training_data.shape,
+            'target_column': target_column,
+            'feature_columns': [],
+            'training_metrics': {},
+            'cross_validation_scores': [],
+            'feature_importance': {},
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Prepare features and target
+        if target_column not in training_data.columns:
+            # Try alternative target column names
+            possible_targets = ['target', 'DEFAULT', 'default', 'y']
+            target_column = next((col for col in possible_targets if col in training_data.columns), None)
+            
+            if target_column is None:
+                raise ValueError("No target column found in training data")
+        
+        X = training_data.drop(columns=[target_column])
+        y = training_data[target_column]
+        
+        training_result['feature_columns'] = list(X.columns)
+        training_result['target_distribution'] = y.value_counts().to_dict()
+        
+        # Split data for training and validation
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
+        
+        # Train the model
+        model = model_result['model_object']
+        start_time = datetime.now()
+        model.fit(X_train, y_train)
+        training_time = (datetime.now() - start_time).total_seconds()
+        
+        # Make predictions
+        y_pred = model.predict(X_test)
+        y_pred_proba = model.predict_proba(X_test)[:, 1]
+        
+        # Calculate metrics
+        training_result['training_metrics'] = {
+            'training_time_seconds': training_time,
+            'accuracy': model.score(X_test, y_test),
+            'roc_auc': roc_auc_score(y_test, y_pred_proba),
+            'classification_report': classification_report(y_test, y_pred, output_dict=True),
+            'confusion_matrix': confusion_matrix(y_test, y_pred).tolist()
+        }
+        
+        # Cross-validation
+        cv_scores = cross_val_score(model, X_train, y_train, cv=5, scoring='roc_auc')
+        training_result['cross_validation_scores'] = {
+            'scores': cv_scores.tolist(),
+            'mean': cv_scores.mean(),
+            'std': cv_scores.std()
+        }
+        
+        # Feature importance
+        if hasattr(model, 'feature_importances_'):
+            feature_importance = dict(zip(X.columns, model.feature_importances_))
+            training_result['feature_importance'] = dict(
+                sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)
+            )
+        
+        # Initialize SHAP explainer if available
+        if model_result.get('shap_enabled', False):
+            try:
+                import shap
+                explainer = shap.TreeExplainer(model)
+                model_result['shap_explainer'] = explainer
+                training_result['shap_initialized'] = True
+            except Exception as e:
+                training_result['shap_error'] = str(e)
+        
+        # Update model result
+        model_result['is_trained'] = True
+        model_result['training_metrics'] = training_result['training_metrics']
+        model_result['feature_importance'] = training_result['feature_importance']
+        
+        training_result['training_completed'] = True
+        
+        # Save training results
+        training_report_path = output_dir / f"training_report_{model_result['model_id']}.json"
+        with open(training_report_path, 'w') as f:
+            json.dump(training_result, f, indent=2, default=str)
+        
+        logger.info(f"Model training completed: Accuracy {training_result['training_metrics']['accuracy']:.3f}")
+        return training_result
+        
+    except Exception as e:
+        logger.error(f"Error training batch prediction model: {e}")
+        return {'error': str(e), 'training_completed': False}
+
+def execute_batch_predictions(
+    batch_data: pd.DataFrame,
+    model_config: Dict[str, Any],
+    batch_size: int = 1000,
+    n_jobs: int = -1
+) -> Dict[str, Any]:
+    """
+    Execute batch predictions on preprocessed data with progress tracking.
+    
+    Args:
+        batch_data: Preprocessed batch data
+        model_config: Model configuration dictionary
+        batch_size: Size of processing batches
+        n_jobs: Number of parallel jobs (-1 for all cores)
+    
+    Returns:
+        Dictionary containing predictions and metadata
+    """
+    try:
+        logger.info(f"Starting batch predictions for {len(batch_data)} records")
+        
+        # Initialize prediction result dictionary
+        prediction_result = {
+            'predictions': [],
+            'probabilities': [],
+            'batch_metadata': {
+                'total_records': len(batch_data),
+                'batch_size': batch_size,
+                'processing_start': datetime.now().isoformat(),
+                'model_version': model_config.get('version', '1.0'),
+                'feature_count': len(batch_data.columns)
+            },
+            'processing_stats': {
+                'batches_processed': 0,
+                'records_processed': 0,
+                'processing_times': [],
+                'memory_usage': []
+            }
+        }
+        
+        # Load the trained model
+        model_path = model_config.get('model_path', '/home/user/output/credit_model.joblib')
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found: {model_path}")
+        
+        model = joblib.load(model_path)
+        logger.info(f"Model loaded from {model_path}")
+        
+        # Process data in batches
+        total_batches = (len(batch_data) + batch_size - 1) // batch_size
+        
+        for batch_idx in range(0, len(batch_data), batch_size):
+            batch_start_time = time.time()
+            
+            # Extract current batch
+            end_idx = min(batch_idx + batch_size, len(batch_data))
+            current_batch = batch_data.iloc[batch_idx:end_idx]
+            
+            logger.info(f"Processing batch {batch_idx//batch_size + 1}/{total_batches} "
+                       f"(records {batch_idx+1}-{end_idx})")
+            
+            # Make predictions for current batch
+            batch_predictions = model.predict(current_batch)
+            batch_probabilities = model.predict_proba(current_batch)
+            
+            # Store results
+            prediction_result['predictions'].extend(batch_predictions.tolist())
+            prediction_result['probabilities'].extend(batch_probabilities.tolist())
+            
+            # Update processing statistics
+            batch_processing_time = time.time() - batch_start_time
+            prediction_result['processing_stats']['batches_processed'] += 1
+            prediction_result['processing_stats']['records_processed'] = end_idx
+            prediction_result['processing_stats']['processing_times'].append(batch_processing_time)
+            
+            # Monitor memory usage
+            import psutil
+            memory_usage = psutil.Process().memory_info().rss / 1024 / 1024  # MB
+            prediction_result['processing_stats']['memory_usage'].append(memory_usage)
+            
+            # Progress logging
+            progress_pct = (end_idx / len(batch_data)) * 100
+            logger.info(f"Batch {batch_idx//batch_size + 1} completed in {batch_processing_time:.2f}s "
+                       f"({progress_pct:.1f}% total progress)")
+        
+        # Finalize results
+        prediction_result['batch_metadata']['processing_end'] = datetime.now().isoformat()
+        prediction_result['batch_metadata']['total_processing_time'] = sum(
+            prediction_result['processing_stats']['processing_times']
+        )
+        
+        # Calculate summary statistics
+        predictions_array = np.array(prediction_result['predictions'])
+        probabilities_array = np.array(prediction_result['probabilities'])
+        
+        prediction_result['summary_stats'] = {
+            'default_rate': float(np.mean(predictions_array)),
+            'high_risk_count': int(np.sum(predictions_array == 1)),
+            'low_risk_count': int(np.sum(predictions_array == 0)),
+            'avg_default_probability': float(np.mean(probabilities_array[:, 1])),
+            'max_default_probability': float(np.max(probabilities_array[:, 1])),
+            'min_default_probability': float(np.min(probabilities_array[:, 1]))
+        }
+        
+        # Save batch results
+        results_path = '/home/user/output/batch_predictions_results.json'
+        with open(results_path, 'w') as f:
+            json.dump(prediction_result, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Batch predictions completed successfully. Results saved to {results_path}")
+        logger.info(f"Processed {len(batch_data)} records in {total_batches} batches")
+        logger.info(f"Default rate: {prediction_result['summary_stats']['default_rate']:.3f}")
+        
+        return prediction_result
+        
+    except Exception as e:
+        logger.error(f"Error in batch predictions: {str(e)}")
+        error_result = {
+            'error': str(e),
+            'timestamp': datetime.now().isoformat(),
+            'batch_size': len(batch_data) if 'batch_data' in locals() else 0
+        }
+        
+        # Save error information
+        with open('/home/user/output/batch_prediction_errors.json', 'w') as f:
+            json.dump(error_result, f, indent=2)
+        
+        raise
+
+
+def generate_batch_shap_explanations(
+    batch_data: pd.DataFrame,
+    model_config: Dict[str, Any],
+    sample_size: int = 100,
+    explanation_type: str = 'summary'
+) -> Dict[str, Any]:
+    """
+    Generate SHAP explanations for batch predictions.
+    
+    Args:
+        batch_data: Preprocessed batch data
+        model_config: Model configuration dictionary
+        sample_size: Number of samples for SHAP analysis
+        explanation_type: Type of explanation ('summary', 'detailed', 'individual')
+    
+    Returns:
+        Dictionary containing SHAP explanations and visualizations
+    """
+    try:
+        logger.info(f"Generating SHAP explanations for batch data (sample_size: {sample_size})")
+        
+        # Load model
+        model_path = model_config.get('model_path', '/home/user/output/credit_model.joblib')
+        model = joblib.load(model_path)
+        
+        # Sample data for SHAP analysis (computational efficiency)
+        if len(batch_data) > sample_size:
+            sample_data = batch_data.sample(n=sample_size, random_state=42)
+            logger.info(f"Sampled {sample_size} records from {len(batch_data)} for SHAP analysis")
+        else:
+            sample_data = batch_data.copy()
+            logger.info(f"Using all {len(batch_data)} records for SHAP analysis")
+        
+        # Initialize SHAP explainer
+        explainer = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(sample_data)
+        
+        # Handle binary classification (get positive class SHAP values)
+        if isinstance(shap_values, list):
+            shap_values_positive = shap_values[1]  # Default class (positive)
+        else:
+            shap_values_positive = shap_values
+        
+        explanation_result = {
+            'metadata': {
+                'sample_size': len(sample_data),
+                'feature_count': len(sample_data.columns),
+                'explanation_type': explanation_type,
+                'generation_time': datetime.now().isoformat()
+            },
+            'feature_importance': {},
+            'shap_summary': {},
+            'visualizations': []
+        }
+        
+        # Calculate feature importance
+        feature_importance = np.abs(shap_values_positive).mean(axis=0)
+        feature_names = sample_data.columns.tolist()
+        
+        for i, feature in enumerate(feature_names):
+            explanation_result['feature_importance'][feature] = float(feature_importance[i])
+        
+        # Sort features by importance
+        sorted_features = sorted(
+            explanation_result['feature_importance'].items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        
+        # Generate summary statistics
+        explanation_result['shap_summary'] = {
+            'top_5_features': dict(sorted_features[:5]),
+            'mean_abs_shap': float(np.mean(np.abs(shap_values_positive))),
+            'max_shap_impact': float(np.max(np.abs(shap_values_positive))),
+            'feature_contribution_variance': float(np.var(feature_importance))
+        }
+        
+        # Generate visualizations based on explanation type
+        plt.style.use('default')
+        
+        if explanation_type in ['summary', 'detailed']:
+            # Summary plot
+            plt.figure(figsize=(10, 8))
+            shap.summary_plot(shap_values_positive, sample_data, show=False)
+            summary_plot_path = '/home/user/output/shap_summary_plot.png'
+            plt.savefig(summary_plot_path, bbox_inches='tight', dpi=300)
+            plt.close()
+            explanation_result['visualizations'].append({
+                'type': 'summary_plot',
+                'path': summary_plot_path,
+                'description': 'SHAP summary plot showing feature importance and impact distribution'
+            })
+            
+            # Feature importance bar plot
+            plt.figure(figsize=(10, 6))
+            top_features = dict(sorted_features[:10])
+            plt.barh(list(top_features.keys()), list(top_features.values()))
+            plt.xlabel('Mean |SHAP Value|')
+            plt.title('Top 10 Feature Importance (SHAP)')
+            plt.tight_layout()
+            importance_plot_path = '/home/user/output/shap_feature_importance.png'
+            plt.savefig(importance_plot_path, bbox_inches='tight', dpi=300)
+            plt.close()
+            explanation_result['visualizations'].append({
+                'type': 'feature_importance',
+                'path': importance_plot_path,
+                'description': 'Top 10 most important features based on SHAP values'
+            })
+        
+        if explanation_type == 'detailed':
+            # Waterfall plot for first sample
+            plt.figure(figsize=(10, 8))
+            shap.waterfall_plot(
+                explainer.expected_value[1], 
+                shap_values_positive[0], 
+                sample_data.iloc[0],
+                show=False
+            )
+            waterfall_path = '/home/user/output/shap_waterfall_sample.png'
+            plt.savefig(waterfall_path, bbox_inches='tight', dpi=300)
+            plt.close()
+            explanation_result['visualizations'].append({
+                'type': 'waterfall_plot',
+                'path': waterfall_path,
+                'description': 'SHAP waterfall plot for sample prediction explanation'
+            })
+        
+        # Save explanation results
+        explanation_path = '/home/user/output/batch_shap_explanations.json'
+        with open(explanation_path, 'w') as f:
+            json.dump(explanation_result, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"SHAP explanations generated successfully. Results saved to {explanation_path}")
+        logger.info(f"Top feature: {sorted_features[0][0]} (importance: {sorted_features[0][1]:.4f})")
+        
+        return explanation_result
+        
+    except Exception as e:
+        logger.error(f"Error generating SHAP explanations: {str(e)}")
+        raise
+
+
+def optimize_batch_prediction_performance(
+    batch_config: Dict[str, Any],
+    performance_metrics: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Optimize batch prediction performance based on system metrics and processing history.
+    
+    Args:
+        batch_config: Current batch processing configuration
+        performance_metrics: Historical performance metrics
+    
+    Returns:
+        Optimized configuration recommendations
+    """
+    try:
+        logger.info("Analyzing batch prediction performance for optimization")
+        
+        # Get system information
+        import psutil
+        cpu_count = psutil.cpu_count()
+        memory_gb = psutil.virtual_memory().total / (1024**3)
+        
+        optimization_result = {
+            'current_config': batch_config.copy(),
+            'system_info': {
+                'cpu_cores': cpu_count,
+                'memory_gb': round(memory_gb, 2),
+                'analysis_time': datetime.now().isoformat()
+            },
+            'performance_analysis': {},
+            'recommendations': {},
+            'optimized_config': {}
+        }
+        
+        # Analyze current performance
+        if 'processing_times' in performance_metrics:
+            processing_times = performance_metrics['processing_times']
+            memory_usage = performance_metrics.get('memory_usage', [])
+            
+            optimization_result['performance_analysis'] = {
+                'avg_batch_time': float(np.mean(processing_times)),
+                'max_batch_time': float(np.max(processing_times)),
+                'min_batch_time': float(np.min(processing_times)),
+                'time_variance': float(np.var(processing_times)),
+                'avg_memory_mb': float(np.mean(memory_usage)) if memory_usage else 0,
+                'max_memory_mb': float(np.max(memory_usage)) if memory_usage else 0
+            }
+            
+            # Calculate throughput
+            current_batch_size = batch_config.get('batch_size', 1000)
+            avg_throughput = current_batch_size / optimization_result['performance_analysis']['avg_batch_time']
+            optimization_result['performance_analysis']['throughput_records_per_sec'] = float(avg_throughput)
+        
+        # Generate optimization recommendations
+        current_batch_size = batch_config.get('batch_size', 1000)
+        current_n_jobs = batch_config.get('n_jobs', -1)
+        
+        # Batch size optimization
+        if 'avg_batch_time' in optimization_result['performance_analysis']:
+            avg_time = optimization_result['performance_analysis']['avg_batch_time']
+            avg_memory = optimization_result['performance_analysis'].get('avg_memory_mb', 0)
+            
+            # Optimize batch size based on processing time and memory
+            if avg_time < 1.0 and avg_memory < memory_gb * 1024 * 0.5:  # Under 50% memory usage
+                recommended_batch_size = min(current_batch_size * 2, 5000)
+                optimization_result['recommendations']['batch_size'] = {
+                    'current': current_batch_size,
+                    'recommended': recommended_batch_size,
+                    'reason': 'Low processing time and memory usage - increase batch size'
+                }
+            elif avg_time > 10.0 or avg_memory > memory_gb * 1024 * 0.8:  # Over 80% memory usage
+                recommended_batch_size = max(current_batch_size // 2, 100)
+                optimization_result['recommendations']['batch_size'] = {
+                    'current': current_batch_size,
+                    'recommended': recommended_batch_size,
+                    'reason': 'High processing time or memory usage - decrease batch size'
+                }
+            else:
+                optimization_result['recommendations']['batch_size'] = {
+                    'current': current_batch_size,
+                    'recommended': current_batch_size,
+                    'reason': 'Current batch size is optimal'
+                }
+        
+        # Parallel processing optimization
+        if cpu_count > 1:
+            if current_n_jobs == -1:
+                recommended_n_jobs = max(1, cpu_count - 1)  # Leave one core free
+            else:
+                recommended_n_jobs = min(current_n_jobs, cpu_count)
+            
+            optimization_result['recommendations']['n_jobs'] = {
+                'current': current_n_jobs,
+                'recommended': recommended_n_jobs,
+                'reason': f'Optimize for {cpu_count} CPU cores'
+            }
+        
+        # Memory optimization recommendations
+        if memory_gb < 8:
+            optimization_result['recommendations']['memory_optimization'] = {
+                'chunking': 'Use smaller batch sizes for low-memory systems',
+                'data_types': 'Consider using more efficient data types (float32 vs float64)',
+                'garbage_collection': 'Implement explicit garbage collection between batches'
+            }
+        
+        # Create optimized configuration
+        optimization_result['optimized_config'] = batch_config.copy()
+        
+        if 'batch_size' in optimization_result['recommendations']:
+            optimization_result['optimized_config']['batch_size'] = \
+                optimization_result['recommendations']['batch_size']['recommended']
+        
+        if 'n_jobs' in optimization_result['recommendations']:
+            optimization_result['optimized_config']['n_jobs'] = \
+                optimization_result['recommendations']['n_jobs']['recommended']
+        
+        # Add performance monitoring settings
+        optimization_result['optimized_config']['enable_monitoring'] = True
+        optimization_result['optimized_config']['memory_threshold_mb'] = memory_gb * 1024 * 0.8
+        optimization_result['optimized_config']['max_batch_time_seconds'] = 15.0
+        
+        # Calculate expected performance improvement
+        if 'throughput_records_per_sec' in optimization_result['performance_analysis']:
+            current_throughput = optimization_result['performance_analysis']['throughput_records_per_sec']
+            batch_size_ratio = optimization_result['optimized_config']['batch_size'] / current_batch_size
+            expected_throughput = current_throughput * batch_size_ratio * 0.9  # Conservative estimate
+            
+            optimization_result['expected_improvement'] = {
+                'current_throughput': float(current_throughput),
+                'expected_throughput': float(expected_throughput),
+                'improvement_factor': float(expected_throughput / current_throughput)
+            }
+        
+        # Save optimization results
+        optimization_path = '/home/user/output/batch_optimization_results.json'
+        with open(optimization_path, 'w') as f:
+            json.dump(optimization_result, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Performance optimization analysis completed. Results saved to {optimization_path}")
+        
+        if 'batch_size' in optimization_result['recommendations']:
+            rec = optimization_result['recommendations']['batch_size']
+            logger.info(f"Batch size recommendation: {rec['current']} → {rec['recommended']}")
+        
+        return optimization_result
+        
+    except Exception as e:
+        logger.error(f"Error in performance optimization: {str(e)}")
+        raise
+ 
+
+# Test Cell 7.3 functions
+print("\n" + "="*50)
+print("Testing Cell 7.3: Batch Prediction Engine")
+print("="*50)
+
+# Initialize model
+model_config = {'model_type': 'random_forest', 'n_estimators': 50, 'enable_shap': False}  # Disable SHAP for testing
+model_result = initialize_batch_prediction_model(model_config)
+print(f"✅ Model initialized: {model_result['model_id']}")
+
+# Train model with test data
+training_result = train_batch_prediction_model(model_result, test_data)
+print(f"✅ Model trained: Accuracy {training_result['training_metrics']['accuracy']:.3f}")
+
+# Execute batch predictions
+prediction_result = execute_batch_predictions(model_result, test_data.drop(columns=['default.payment.next.month']), batch_size=500)
+print(f"✅ Batch predictions: {prediction_result['prediction_summary']['total_predictions']} predictions")
+
+# Generate SHAP explanations (simplified for testing)
+try:
+    shap_result = generate_batch_shap_explanations(model_result, test_data.drop(columns=['default.payment.next.month']).head(50), sample_size=20)
+    if 'error' in shap_result:
+        print(f"⚠️ SHAP explanations: {shap_result['error']}")
+    else:
+        print(f"✅ SHAP explanations: {len(shap_result['feature_importance_shap'])} features analyzed")
+except Exception as e:
+    print(f"⚠️ SHAP explanations skipped: {e}")
+
+# Optimize performance
+optimization_result = optimize_batch_prediction_performance(model_result)
+print(f"✅ Performance optimization: {len(optimization_result['optimizations_applied'])} optimizations applied")
+
+print("✅ Cell 7.3 completed successfully!")
+
+# =============================================================================
+# Cell 7.4: Batch Results Analysis and Visualization (5 functions)
+# =============================================================================
+
+def analyze_batch_prediction_results(prediction_result: Dict[str, Any],
+                                   analysis_config: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Analyze batch prediction results with comprehensive statistical analysis.
+    
+    Args:
+        prediction_result: Batch prediction results
+        analysis_config: Configuration for analysis
+    
+    Returns:
+        Comprehensive analysis results
+    """
+    try:
+        if analysis_config is None:
+            analysis_config = {
+                'include_distribution_analysis': True,
+                'include_risk_segmentation': True,
+                'include_confidence_analysis': True,
+                'include_statistical_tests': True,
+                'confidence_thresholds': [0.3, 0.7, 0.9]
+            }
+        
+        analysis_result = {
+            'analysis_id': datetime.now().strftime("%Y%m%d_%H%M%S"),
+            'prediction_id': prediction_result.get('prediction_id'),
+            'total_predictions': len(prediction_result.get('predictions', [])),
+            'distribution_analysis': {},
+            'risk_segmentation': {},
+            'confidence_analysis': {},
+            'statistical_summary': {},
+            'quality_metrics': {},
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        predictions = np.array(prediction_result.get('predictions', []))
+        probabilities = np.array(prediction_result.get('prediction_probabilities', []))
+        
+        if len(predictions) == 0 or len(probabilities) == 0:
+            raise ValueError("No prediction data available for analysis")
+        
+        # Distribution Analysis
+        if analysis_config.get('include_distribution_analysis', True):
+            analysis_result['distribution_analysis'] = {
+                'prediction_distribution': {
+                    'positive_predictions': int(np.sum(predictions == 1)),
+                    'negative_predictions': int(np.sum(predictions == 0)),
+                    'positive_rate': float(np.mean(predictions)),
+                    'negative_rate': float(1 - np.mean(predictions))
+                },
+                'probability_distribution': {
+                    'mean_probability': float(np.mean(probabilities)),
+                    'median_probability': float(np.median(probabilities)),
+                    'std_probability': float(np.std(probabilities)),
+                    'min_probability': float(np.min(probabilities)),
+                    'max_probability': float(np.max(probabilities)),
+                    'quartiles': {
+                        'q25': float(np.percentile(probabilities, 25)),
+                        'q50': float(np.percentile(probabilities, 50)),
+                        'q75': float(np.percentile(probabilities, 75))
+                    }
+                }
+            }
+        
+        # Risk Segmentation Analysis
+        if analysis_config.get('include_risk_segmentation', True):
+            thresholds = analysis_config.get('confidence_thresholds', [0.3, 0.7, 0.9])
+            
+            risk_segments = {
+                'low_risk': np.sum(probabilities < thresholds[0]),
+                'medium_risk': np.sum((probabilities >= thresholds[0]) & (probabilities < thresholds[1])),
+                'high_risk': np.sum((probabilities >= thresholds[1]) & (probabilities < thresholds[2])),
+                'very_high_risk': np.sum(probabilities >= thresholds[2])
+            }
+            
+            total_count = len(probabilities)
+            analysis_result['risk_segmentation'] = {
+                'segments': risk_segments,
+                'segment_percentages': {
+                    segment: float(count / total_count * 100)
+                    for segment, count in risk_segments.items()
+                },
+                'thresholds_used': thresholds,
+                'risk_distribution_summary': {
+                    'highest_risk_segment': max(risk_segments.items(), key=lambda x: x[1])[0],
+                    'most_common_risk_level': max(risk_segments.items(), key=lambda x: x[1])[0]
+                }
+            }
+        
+        # Confidence Analysis
+        if analysis_config.get('include_confidence_analysis', True):
+            # Calculate prediction confidence (distance from 0.5)
+            confidence_scores = np.abs(probabilities - 0.5) * 2  # Scale to 0-1
+            
+            analysis_result['confidence_analysis'] = {
+                'overall_confidence': {
+                    'mean_confidence': float(np.mean(confidence_scores)),
+                    'median_confidence': float(np.median(confidence_scores)),
+                    'std_confidence': float(np.std(confidence_scores)),
+                    'high_confidence_count': int(np.sum(confidence_scores > 0.8)),
+                    'low_confidence_count': int(np.sum(confidence_scores < 0.2))
+                },
+                'confidence_by_prediction': {
+                    'positive_predictions_confidence': float(np.mean(confidence_scores[predictions == 1])) if np.any(predictions == 1) else 0.0,
+                    'negative_predictions_confidence': float(np.mean(confidence_scores[predictions == 0])) if np.any(predictions == 0) else 0.0
+                },
+                'confidence_distribution': {
+                    'very_high_confidence': int(np.sum(confidence_scores > 0.9)),
+                    'high_confidence': int(np.sum((confidence_scores > 0.7) & (confidence_scores <= 0.9))),
+                    'medium_confidence': int(np.sum((confidence_scores > 0.5) & (confidence_scores <= 0.7))),
+                    'low_confidence': int(np.sum(confidence_scores <= 0.5))
+                }
+            }
+        
+        # Statistical Summary
+        if analysis_config.get('include_statistical_tests', True):
+            from scipy import stats
+            
+            # Test for normality of probabilities
+            try:
+                shapiro_stat, shapiro_p = stats.shapiro(probabilities[:5000] if len(probabilities) > 5000 else probabilities)
+                normality_test = {
+                    'test': 'shapiro_wilk',
+                    'statistic': float(shapiro_stat),
+                    'p_value': float(shapiro_p),
+                    'is_normal': shapiro_p > 0.05
+                }
+            except:
+                normality_test = {'test': 'shapiro_wilk', 'error': 'Could not perform test'}
+            
+            analysis_result['statistical_summary'] = {
+                'normality_test': normality_test,
+                'descriptive_statistics': {
+                    'skewness': float(stats.skew(probabilities)),
+                    'kurtosis': float(stats.kurtosis(probabilities)),
+                    'variance': float(np.var(probabilities)),
+                    'coefficient_of_variation': float(np.std(probabilities) / np.mean(probabilities)) if np.mean(probabilities) > 0 else 0.0
+                }
+            }
+        
+        # Quality Metrics
+        analysis_result['quality_metrics'] = {
+            'prediction_consistency': float(1 - np.std(probabilities)),  # Higher is more consistent
+            'decision_boundary_clarity': float(np.mean(np.abs(probabilities - 0.5))),  # Higher is clearer
+            'extreme_predictions_ratio': float(np.sum((probabilities < 0.1) | (probabilities > 0.9)) / len(probabilities)),
+            'balanced_predictions': float(1 - abs(0.5 - np.mean(predictions))),  # Closer to 1 is more balanced
+            'overall_quality_score': 0.0  # Will be calculated
+        }
+        
+        # Calculate overall quality score
+        quality_factors = [
+            analysis_result['quality_metrics']['prediction_consistency'],
+            analysis_result['quality_metrics']['decision_boundary_clarity'],
+            min(1.0, 1 - analysis_result['quality_metrics']['extreme_predictions_ratio']),
+            analysis_result['confidence_analysis']['overall_confidence']['mean_confidence']
+        ]
+        analysis_result['quality_metrics']['overall_quality_score'] = float(np.mean(quality_factors))
+        
+        # Save analysis results
+        analysis_path = output_dir / f"batch_analysis_{analysis_result['analysis_id']}.json"
+        with open(analysis_path, 'w') as f:
+            json.dump(analysis_result, f, indent=2, default=str)
+        
+        logger.info(f"Batch analysis completed: Quality score {analysis_result['quality_metrics']['overall_quality_score']:.3f}")
+        return analysis_result
+        
+    except Exception as e:
+        logger.error(f"Error analyzing batch prediction results: {e}")
+        return {'error': str(e)}
+
+def create_batch_visualization_dashboard(analysis_result: Dict[str, Any],
+                                       prediction_result: Dict[str, Any],
+                                       viz_config: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Create comprehensive visualization dashboard for batch prediction results.
+    
+    Args:
+        analysis_result: Analysis results from analyze_batch_prediction_results
+        prediction_result: Original prediction results
+        viz_config: Visualization configuration
+    
+    Returns:
+        Dashboard creation result
+    """
+    try:
+        if viz_config is None:
+            viz_config = {
+                'figure_size': (15, 12),
+                'save_plots': True,
+                'plot_types': ['distribution', 'risk_segments', 'confidence', 'probability_histogram'],
+                'color_scheme': 'viridis',
+                'high_dpi': True
+            }
+        
+        dashboard_result = {
+            'dashboard_id': datetime.now().strftime("%Y%m%d_%H%M%S"),
+            'analysis_id': analysis_result.get('analysis_id'),
+            'plots_created': [],
+            'saved_files': [],
+            'dashboard_summary': {},
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Configure matplotlib
+        plt.rcParams['font.family'] = ['Arial', 'DejaVu Sans', 'Liberation Sans', 'sans-serif']
+        plt.rcParams['figure.dpi'] = 150 if viz_config.get('high_dpi', True) else 100
+        
+        predictions = np.array(prediction_result.get('predictions', []))
+        probabilities = np.array(prediction_result.get('prediction_probabilities', []))
+        
+        if len(predictions) == 0 or len(probabilities) == 0:
+            raise ValueError("No prediction data available for visualization")
+        
+        # Create main dashboard figure
+        fig = plt.figure(figsize=viz_config.get('figure_size', (15, 12)))
+        
+        # Plot 1: Prediction Distribution
+        if 'distribution' in viz_config.get('plot_types', []):
+            ax1 = plt.subplot(2, 3, 1)
+            prediction_counts = [np.sum(predictions == 0), np.sum(predictions == 1)]
+            labels = ['No Default', 'Default']
+            colors = ['#2E8B57', '#DC143C']
+            
+            wedges, texts, autotexts = ax1.pie(prediction_counts, labels=labels, colors=colors, 
+                                             autopct='%1.1f%%', startangle=90)
+            ax1.set_title('Prediction Distribution', fontsize=12, fontweight='bold')
+            dashboard_result['plots_created'].append('prediction_distribution_pie')
+        
+        # Plot 2: Risk Segmentation
+        if 'risk_segments' in viz_config.get('plot_types', []):
+            ax2 = plt.subplot(2, 3, 2)
+            risk_data = analysis_result.get('risk_segmentation', {}).get('segments', {})
+            
+            if risk_data:
+                risk_labels = list(risk_data.keys())
+                risk_values = list(risk_data.values())
+                colors = ['#90EE90', '#FFD700', '#FF6347', '#8B0000']
+                
+                bars = ax2.bar(risk_labels, risk_values, color=colors[:len(risk_labels)])
+                ax2.set_title('Risk Segmentation', fontsize=12, fontweight='bold')
+                ax2.set_ylabel('Number of Cases')
+                ax2.tick_params(axis='x', rotation=45)
+                
+                # Add value labels on bars
+                for bar in bars:
+                    height = bar.get_height()
+                    ax2.text(bar.get_x() + bar.get_width()/2., height,
+                            f'{int(height)}', ha='center', va='bottom')
+                
+                dashboard_result['plots_created'].append('risk_segmentation_bar')
+        
+        # Plot 3: Probability Distribution Histogram
+        if 'probability_histogram' in viz_config.get('plot_types', []):
+            ax3 = plt.subplot(2, 3, 3)
+            ax3.hist(probabilities, bins=30, alpha=0.7, color='skyblue', edgecolor='black')
+            ax3.axvline(np.mean(probabilities), color='red', linestyle='--', 
+                       label=f'Mean: {np.mean(probabilities):.3f}')
+            ax3.axvline(np.median(probabilities), color='green', linestyle='--', 
+                       label=f'Median: {np.median(probabilities):.3f}')
+            ax3.set_title('Probability Distribution', fontsize=12, fontweight='bold')
+            ax3.set_xlabel('Default Probability')
+            ax3.set_ylabel('Frequency')
+            ax3.legend()
+            dashboard_result['plots_created'].append('probability_histogram')
+        
+        # Plot 4: Confidence Analysis
+        if 'confidence' in viz_config.get('plot_types', []):
+            ax4 = plt.subplot(2, 3, 4)
+            confidence_scores = np.abs(probabilities - 0.5) * 2
+            
+            confidence_data = analysis_result.get('confidence_analysis', {}).get('confidence_distribution', {})
+            if confidence_data:
+                conf_labels = list(confidence_data.keys())
+                conf_values = list(confidence_data.values())
+                
+                ax4.bar(conf_labels, conf_values, color='lightcoral', alpha=0.7)
+                ax4.set_title('Confidence Distribution', fontsize=12, fontweight='bold')
+                ax4.set_ylabel('Number of Predictions')
+                ax4.tick_params(axis='x', rotation=45)
+                dashboard_result['plots_created'].append('confidence_distribution')
+        
+        # Plot 5: Probability vs Prediction Scatter
+        ax5 = plt.subplot(2, 3, 5)
+        colors = ['blue' if pred == 0 else 'red' for pred in predictions]
+        ax5.scatter(range(len(probabilities[:1000])), probabilities[:1000], 
+                   c=colors[:1000], alpha=0.6, s=10)
+        ax5.axhline(y=0.5, color='black', linestyle='--', alpha=0.5)
+        ax5.set_title('Probability vs Index (First 1000)', fontsize=12, fontweight='bold')
+        ax5.set_xlabel('Sample Index')
+        ax5.set_ylabel('Default Probability')
+        dashboard_result['plots_created'].append('probability_scatter')
+        
+        # Plot 6: Quality Metrics Radar Chart (simplified as bar chart)
+        ax6 = plt.subplot(2, 3, 6)
+        quality_metrics = analysis_result.get('quality_metrics', {})
+        
+        if quality_metrics:
+            metrics_names = ['Consistency', 'Clarity', 'Balance', 'Overall']
+            metrics_values = [
+                quality_metrics.get('prediction_consistency', 0),
+                quality_metrics.get('decision_boundary_clarity', 0),
+                quality_metrics.get('balanced_predictions', 0),
+                quality_metrics.get('overall_quality_score', 0)
+            ]
+            
+            bars = ax6.bar(metrics_names, metrics_values, color='lightgreen', alpha=0.7)
+            ax6.set_title('Quality Metrics', fontsize=12, fontweight='bold')
+            ax6.set_ylabel('Score')
+            ax6.set_ylim(0, 1)
+            ax6.tick_params(axis='x', rotation=45)
+            
+            # Add value labels
+            for bar, value in zip(bars, metrics_values):
+                ax6.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.01,
+                        f'{value:.3f}', ha='center', va='bottom')
+            
+            dashboard_result['plots_created'].append('quality_metrics_bar')
+        # Adjust layout and save 
+
+
+
+        # Adjust layout and save
+        plt.tight_layout()
+        
+        if viz_config.get('save_plots', True):
+            dashboard_path = output_dir / f"batch_dashboard_{dashboard_result['dashboard_id']}.png"
+            plt.savefig(dashboard_path, dpi=300, bbox_inches='tight')
+            dashboard_result['saved_files'].append(str(dashboard_path))
+        
+        plt.show()
+        
+        # Dashboard summary
+        dashboard_result['dashboard_summary'] = {
+            'total_plots': len(dashboard_result['plots_created']),
+            'total_predictions_analyzed': len(predictions),
+            'risk_distribution': analysis_result.get('risk_segmentation', {}).get('segments', {}),
+            'overall_quality': analysis_result.get('quality_metrics', {}).get('overall_quality_score', 0.0),
+            'confidence_level': analysis_result.get('confidence_analysis', {}).get('overall_confidence', {}).get('mean_confidence', 0.0)
+        }
+        
+        # Save dashboard metadata
+        dashboard_metadata_path = output_dir / f"dashboard_metadata_{dashboard_result['dashboard_id']}.json"
+        with open(dashboard_metadata_path, 'w') as f:
+            json.dump(dashboard_result, f, indent=2, default=str)
+        
+        logger.info(f"Visualization dashboard created: {len(dashboard_result['plots_created'])} plots")
+        return dashboard_result
+        
+    except Exception as e:
+        logger.error(f"Error creating batch visualization dashboard: {e}")
+        return {'error': str(e)}
+
+def generate_batch_risk_heatmap(prediction_result: Dict[str, Any],
+                            feature_data: pd.DataFrame = None,
+                            heatmap_config: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Generate risk heatmap visualization for batch predictions.
+    
+    Args:
+        prediction_result: Batch prediction results
+        feature_data: Original feature data for correlation analysis
+        heatmap_config: Heatmap configuration
+    
+    Returns:
+        Heatmap generation result
+    """
+    try:
+        if heatmap_config is None:
+            heatmap_config = {
+                'figure_size': (12, 8),
+                'color_scheme': 'RdYlBu_r',
+                'show_values': True,
+                'risk_bins': 10,
+                'correlation_threshold': 0.3
+            }
+        
+        heatmap_result = {
+            'heatmap_id': datetime.now().strftime("%Y%m%d_%H%M%S"),
+            'prediction_id': prediction_result.get('prediction_id'),
+            'heatmap_type': 'risk_correlation',
+            'visualizations_created': [],
+            'correlation_insights': {},
+            'risk_patterns': {},
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        probabilities = np.array(prediction_result.get('prediction_probabilities', []))
+        
+        if len(probabilities) == 0:
+            raise ValueError("No prediction probabilities available for heatmap")
+        
+        # Configure matplotlib
+        plt.rcParams['font.family'] = ['Arial', 'DejaVu Sans', 'Liberation Sans', 'sans-serif']
+        
+        # Create risk bins
+        risk_bins = heatmap_config.get('risk_bins', 10)
+        prob_bins = np.linspace(0, 1, risk_bins + 1)
+        risk_categories = pd.cut(probabilities, bins=prob_bins, labels=[f'Risk_{i+1}' for i in range(risk_bins)])
+        
+        # Risk distribution heatmap
+        fig, axes = plt.subplots(2, 2, figsize=heatmap_config.get('figure_size', (12, 8)))
+        
+        # Plot 1: Risk Distribution Matrix
+        ax1 = axes[0, 0]
+        risk_counts = risk_categories.value_counts().sort_index()
+        risk_matrix = risk_counts.values.reshape(-1, 1)
+        
+        im1 = ax1.imshow(risk_matrix.T, cmap=heatmap_config.get('color_scheme', 'RdYlBu_r'), aspect='auto')
+        ax1.set_title('Risk Distribution Heatmap', fontweight='bold')
+        ax1.set_xlabel('Risk Categories')
+        ax1.set_xticks(range(len(risk_counts)))
+        ax1.set_xticklabels(risk_counts.index, rotation=45)
+        ax1.set_yticks([])
+        
+        # Add colorbar
+        plt.colorbar(im1, ax=ax1, label='Count')
+        
+        # Plot 2: Probability Density Heatmap
+        ax2 = axes[0, 1]
+        prob_hist, prob_edges = np.histogram(probabilities, bins=20)
+        prob_matrix = prob_hist.reshape(-1, 1)
+        
+        im2 = ax2.imshow(prob_matrix.T, cmap='viridis', aspect='auto')
+        ax2.set_title('Probability Density Heatmap', fontweight='bold')
+        ax2.set_xlabel('Probability Bins')
+        ax2.set_xticks(range(0, len(prob_hist), 4))
+        ax2.set_xticklabels([f'{prob_edges[i]:.2f}' for i in range(0, len(prob_edges), 4)], rotation=45)
+        ax2.set_yticks([])
+        
+        plt.colorbar(im2, ax=ax2, label='Frequency')
+        
+        # Plot 3: Feature Correlation Heatmap (if feature data available)
+        ax3 = axes[1, 0]
+        if feature_data is not None and len(feature_data.columns) > 1:
+            # Calculate correlation with risk scores
+            numeric_features = feature_data.select_dtypes(include=[np.number]).columns[:10]  # Limit to 10 features
+            
+            if len(numeric_features) > 1:
+                correlation_matrix = feature_data[numeric_features].corr()
+                
+                im3 = ax3.imshow(correlation_matrix, cmap='coolwarm', vmin=-1, vmax=1)
+                ax3.set_title('Feature Correlation Heatmap', fontweight='bold')
+                ax3.set_xticks(range(len(numeric_features)))
+                ax3.set_yticks(range(len(numeric_features)))
+                ax3.set_xticklabels(numeric_features, rotation=45, ha='right')
+                ax3.set_yticklabels(numeric_features)
+                
+                # Add correlation values
+                if heatmap_config.get('show_values', True):
+                    for i in range(len(numeric_features)):
+                        for j in range(len(numeric_features)):
+                            ax3.text(j, i, f'{correlation_matrix.iloc[i, j]:.2f}',
+                                ha='center', va='center', fontsize=8)
+                
+                plt.colorbar(im3, ax=ax3, label='Correlation')
+                
+                # Store correlation insights
+                high_correlations = []
+                threshold = heatmap_config.get('correlation_threshold', 0.3)
+                
+                for i in range(len(numeric_features)):
+                    for j in range(i+1, len(numeric_features)):
+                        corr_val = correlation_matrix.iloc[i, j]
+                        if abs(corr_val) > threshold:
+                            high_correlations.append({
+                                'feature1': numeric_features[i],
+                                'feature2': numeric_features[j],
+                                'correlation': float(corr_val)
+                            })
+                
+                heatmap_result['correlation_insights'] = {
+                    'high_correlations': high_correlations,
+                    'correlation_threshold': threshold,
+                    'features_analyzed': list(numeric_features)
+                }
+            else:
+                ax3.text(0.5, 0.5, 'Insufficient numeric features\nfor correlation analysis', 
+                        ha='center', va='center', transform=ax3.transAxes)
+                ax3.set_title('Feature Correlation (Insufficient Data)', fontweight='bold')
+        else:
+            ax3.text(0.5, 0.5, 'No feature data provided\nfor correlation analysis', 
+                    ha='center', va='center', transform=ax3.transAxes)
+            ax3.set_title('Feature Correlation (No Data)', fontweight='bold')
+        
+        # Plot 4: Risk Pattern Analysis
+        ax4 = axes[1, 1]
+        
+        # Create risk pattern matrix (probability ranges vs prediction confidence)
+        confidence_scores = np.abs(probabilities - 0.5) * 2
+        prob_ranges = ['0.0-0.2', '0.2-0.4', '0.4-0.6', '0.6-0.8', '0.8-1.0']
+        conf_ranges = ['Low', 'Medium', 'High']
+        
+        pattern_matrix = np.zeros((len(conf_ranges), len(prob_ranges)))
+        
+        for i, prob_range in enumerate([(0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0)]):
+            prob_mask = (probabilities >= prob_range[0]) & (probabilities < prob_range[1])
+            
+            for j, conf_range in enumerate([(0.0, 0.33), (0.33, 0.67), (0.67, 1.0)]):
+                conf_mask = (confidence_scores >= conf_range[0]) & (confidence_scores < conf_range[1])
+                pattern_matrix[j, i] = np.sum(prob_mask & conf_mask)
+        
+        im4 = ax4.imshow(pattern_matrix, cmap='Blues')
+        ax4.set_title('Risk Pattern Matrix', fontweight='bold')
+        ax4.set_xlabel('Probability Ranges')
+        ax4.set_ylabel('Confidence Levels')
+        ax4.set_xticks(range(len(prob_ranges)))
+        ax4.set_yticks(range(len(conf_ranges)))
+        ax4.set_xticklabels(prob_ranges, rotation=45)
+        ax4.set_yticklabels(conf_ranges)
+        
+        # Add pattern values
+        if heatmap_config.get('show_values', True):
+            for i in range(len(conf_ranges)):
+                for j in range(len(prob_ranges)):
+                    ax4.text(j, i, f'{int(pattern_matrix[i, j])}',
+                           ha='center', va='center', fontweight='bold')
+        
+        plt.colorbar(im4, ax=ax4, label='Count')
+        
+        # Store risk patterns
+        heatmap_result['risk_patterns'] = {
+            'pattern_matrix': pattern_matrix.tolist(),
+            'probability_ranges': prob_ranges,
+            'confidence_ranges': conf_ranges,
+            'dominant_pattern': {
+                'prob_range': prob_ranges[np.unravel_index(pattern_matrix.argmax(), pattern_matrix.shape)[1]],
+                'conf_level': conf_ranges[np.unravel_index(pattern_matrix.argmax(), pattern_matrix.shape)[0]],
+                'count': int(pattern_matrix.max())
+            }
+        }
+        
+        plt.tight_layout()
+        
+        # Save heatmap
+        heatmap_path = output_dir / f"risk_heatmap_{heatmap_result['heatmap_id']}.png"
+        plt.savefig(heatmap_path, dpi=300, bbox_inches='tight')
+        heatmap_result['visualizations_created'].append(str(heatmap_path))
+        
+        plt.show()
+        
+        # Save heatmap metadata
+        heatmap_metadata_path = output_dir / f"heatmap_metadata_{heatmap_result['heatmap_id']}.json"
+        with open(heatmap_metadata_path, 'w') as f:
+            json.dump(heatmap_result, f, indent=2, default=str)
+        
+        logger.info(f"Risk heatmap generated: {len(heatmap_result['visualizations_created'])} visualizations")
+        return heatmap_result
+        
+    except Exception as e:
+        logger.error(f"Error generating batch risk heatmap: {e}")
+        return {'error': str(e)}
+
+def create_interactive_batch_explorer(
+    prediction_results: Dict[str, Any],
+    batch_data: pd.DataFrame
+) -> Dict[str, Any]:
+    """
+    Create interactive dashboard for exploring batch prediction results.
+    
+    Args:
+        prediction_results: Results from batch predictions
+        batch_data: Original batch data
+    
+    Returns:
+        Dashboard configuration and saved visualizations
+    """
+    try:
+        logger.info("Creating interactive batch prediction explorer")
+        
+        # Prepare data for visualization
+        predictions = np.array(prediction_results['predictions'])
+        probabilities = np.array(prediction_results['probabilities'])
+        
+        # Create comprehensive dashboard data
+        dashboard_data = {
+            'metadata': {
+                'creation_time': datetime.now().isoformat(),
+                'total_records': len(predictions),
+                'feature_count': len(batch_data.columns)
+            },
+            'summary_stats': prediction_results.get('summary_stats', {}),
+            'visualizations': [],
+            'interactive_elements': {}
+        }
+        
+        # Set up plotting style
+        plt.style.use('default')
+        plt.rcParams['font.size'] = 10
+        
+        # 1. Prediction Distribution
+        plt.figure(figsize=(12, 8))
+        
+        # Subplot 1: Prediction counts
+        plt.subplot(2, 2, 1)
+        pred_counts = np.bincount(predictions)
+        labels = ['Low Risk (0)', 'High Risk (1)']
+        colors = ['#2ecc71', '#e74c3c']
+        plt.pie(pred_counts, labels=labels, colors=colors, autopct='%1.1f%%', startangle=90)
+        plt.title('Prediction Distribution')
+        
+        # Subplot 2: Probability distribution
+        plt.subplot(2, 2, 2)
+        default_probs = probabilities[:, 1]
+        plt.hist(default_probs, bins=50, alpha=0.7, color='#3498db', edgecolor='black')
+        plt.xlabel('Default Probability')
+        plt.ylabel('Frequency')
+        plt.title('Default Probability Distribution')
+        plt.axvline(np.mean(default_probs), color='red', linestyle='--', 
+                   label=f'Mean: {np.mean(default_probs):.3f}')
+        plt.legend()
+        
+        # Subplot 3: Risk segments
+        plt.subplot(2, 2, 3)
+        risk_segments = pd.cut(default_probs, bins=[0, 0.3, 0.7, 1.0], 
+                              labels=['Low Risk', 'Medium Risk', 'High Risk'])
+        segment_counts = risk_segments.value_counts()
+        plt.bar(segment_counts.index, segment_counts.values, 
+                color=['#2ecc71', '#f39c12', '#e74c3c'])
+        plt.title('Risk Segmentation')
+        plt.ylabel('Count')
+        plt.xticks(rotation=45)
+        
+        # Subplot 4: Processing performance
+        plt.subplot(2, 2, 4)
+        if 'processing_times' in prediction_results['processing_stats']:
+            processing_times = prediction_results['processing_stats']['processing_times']
+            batch_numbers = range(1, len(processing_times) + 1)
+            plt.plot(batch_numbers, processing_times, marker='o', color='#9b59b6')
+            plt.xlabel('Batch Number')
+            plt.ylabel('Processing Time (seconds)')
+            plt.title('Batch Processing Performance')
+            plt.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        dashboard_plot_path = '/home/user/output/batch_dashboard.png'
+        plt.savefig(dashboard_plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        dashboard_data['visualizations'].append({
+            'type': 'main_dashboard',
+            'path': dashboard_plot_path,
+            'description': 'Main batch prediction dashboard with key metrics'
+        })
+        
+        # 2. Feature Analysis (if available)
+        if len(batch_data.columns) > 0:
+            plt.figure(figsize=(14, 10))
+            
+            # Select top features for analysis
+            numeric_features = batch_data.select_dtypes(include=[np.number]).columns[:6]
+            
+            for i, feature in enumerate(numeric_features):
+                plt.subplot(2, 3, i + 1)
+                
+                # Split by prediction
+                low_risk_data = batch_data[predictions == 0][feature]
+                high_risk_data = batch_data[predictions == 1][feature]
+                
+                plt.hist(low_risk_data, alpha=0.7, label='Low Risk', color='#2ecc71', bins=30)
+                plt.hist(high_risk_data, alpha=0.7, label='High Risk', color='#e74c3c', bins=30)
+                plt.xlabel(feature)
+                plt.ylabel('Frequency')
+                plt.title(f'{feature} Distribution by Risk')
+                plt.legend()
+                plt.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            feature_analysis_path = '/home/user/output/batch_feature_analysis.png'
+            plt.savefig(feature_analysis_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            dashboard_data['visualizations'].append({
+                'type': 'feature_analysis',
+                'path': feature_analysis_path,
+                'description': 'Feature distribution analysis by risk category'
+            })
+        
+        # 3. Create interactive data summaries
+        dashboard_data['interactive_elements'] = {
+            'risk_segments': {
+                'low_risk': {
+                    'count': int(np.sum(default_probs < 0.3)),
+                    'percentage': float(np.mean(default_probs < 0.3) * 100),
+                    'avg_probability': float(np.mean(default_probs[default_probs < 0.3]))
+                },
+                'medium_risk': {
+                    'count': int(np.sum((default_probs >= 0.3) & (default_probs < 0.7))),
+                    'percentage': float(np.mean((default_probs >= 0.3) & (default_probs < 0.7)) * 100),
+                    'avg_probability': float(np.mean(default_probs[(default_probs >= 0.3) & (default_probs < 0.7)]))
+                },
+                'high_risk': {
+                    'count': int(np.sum(default_probs >= 0.7)),
+                    'percentage': float(np.mean(default_probs >= 0.7) * 100),
+                    'avg_probability': float(np.mean(default_probs[default_probs >= 0.7]))
+                }
+            },
+            'top_risk_records': {
+                'indices': np.argsort(default_probs)[-10:].tolist(),
+                'probabilities': default_probs[np.argsort(default_probs)[-10:]].tolist()
+            },
+            'processing_summary': {
+                'total_batches': prediction_results['processing_stats']['batches_processed'],
+                'avg_batch_time': float(np.mean(prediction_results['processing_stats']['processing_times'])),
+                'total_processing_time': prediction_results['batch_metadata']['total_processing_time']
+            }
+        }
+        
+        # 4. Generate HTML report template
+        html_template = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Batch Prediction Results Dashboard</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                .metric {{ background: #f8f9fa; padding: 15px; margin: 10px 0; border-radius: 5px; }}
+                .high-risk {{ color: #e74c3c; font-weight: bold; }}
+                .low-risk {{ color: #2ecc71; font-weight: bold; }}
+                .medium-risk {{ color: #f39c12; font-weight: bold; }}
+            </style>
+        </head>
+        <body>
+            <h1>Batch Prediction Results Dashboard</h1>
+            <div class="metric">
+                <h3>Summary Statistics</h3>
+                <p>Total Records: {len(predictions):,}</p>
+                <p>Default Rate: {np.mean(predictions):.1%}</p>
+                <p>Average Default Probability: {np.mean(default_probs):.3f}</p>
+            </div>
+            <div class="metric">
+                <h3>Risk Segmentation</h3>
+                <p class="low-risk">Low Risk (&lt;30%): {dashboard_data['interactive_elements']['risk_segments']['low_risk']['count']:,} records</p>
+                <p class="medium-risk">Medium Risk (30-70%): {dashboard_data['interactive_elements']['risk_segments']['medium_risk']['count']:,} records</p>
+                <p class="high-risk">High Risk (&gt;70%): {dashboard_data['interactive_elements']['risk_segments']['high_risk']['count']:,} records</p>
+            </div>
+        </body>
+        </html>
+        """
+        
+        html_path = '/home/user/output/batch_dashboard.html'
+        with open(html_path, 'w') as f:
+            f.write(html_template)
+        
+        dashboard_data['html_report'] = html_path
+        
+        # Save dashboard configuration
+        dashboard_path = '/home/user/output/batch_explorer_config.json'
+        with open(dashboard_path, 'w') as f:
+            json.dump(dashboard_data, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Interactive batch explorer created successfully")
+        logger.info(f"Dashboard saved to {dashboard_path}")
+        logger.info(f"HTML report available at {html_path}")
+        
+        return dashboard_data
+        
+    except Exception as e:
+        logger.error(f"Error creating interactive batch explorer: {str(e)}")
+        raise
+def export_batch_results_comprehensive(
+    prediction_results: Dict[str, Any],
+    batch_data: pd.DataFrame,
+    export_formats: List[str] = ['csv', 'excel', 'json']
+) -> Dict[str, str]:
+    """
+    Export batch prediction results in multiple comprehensive formats.
+    
+    Args:
+        prediction_results: Results from batch predictions
+        batch_data: Original batch data
+        export_formats: List of export formats ('csv', 'excel', 'json', 'parquet')
+    
+    Returns:
+        Dictionary mapping format names to file paths
+    """
+    try:
+        logger.info(f"Exporting batch results in formats: {export_formats}")
+        
+        # Prepare comprehensive results dataframe
+        results_df = batch_data.copy()
+        results_df['prediction'] = prediction_results['predictions']
+        results_df['default_probability'] = [prob[1] for prob in prediction_results['probabilities']]
+        results_df['risk_score'] = results_df['default_probability'] * 100
+        
+        # Add risk categories
+        results_df['risk_category'] = pd.cut(
+            results_df['default_probability'],
+            bins=[0, 0.3, 0.7, 1.0],
+            labels=['Low Risk', 'Medium Risk', 'High Risk']
+        )
+        
+        # Add record metadata
+        results_df['prediction_timestamp'] = prediction_results['batch_metadata']['processing_start']
+        results_df['model_version'] = prediction_results['batch_metadata']['model_version']
+        results_df['record_id'] = range(1, len(results_df) + 1)
+        
+        export_paths = {}
+        
+        # CSV Export
+        if 'csv' in export_formats:
+            csv_path = '/home/user/output/batch_predictions_complete.csv'
+            results_df.to_csv(csv_path, index=False)
+            export_paths['csv'] = csv_path
+            logger.info(f"CSV export completed: {csv_path}")
+        
+        # Excel Export with multiple sheets
+        if 'excel' in export_formats:
+            excel_path = '/home/user/output/batch_predictions_complete.xlsx'
+            with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+                # Main results
+                results_df.to_excel(writer, sheet_name='Predictions', index=False)
+                
+                # Summary statistics
+                summary_stats = pd.DataFrame([prediction_results['summary_stats']]).T
+                summary_stats.columns = ['Value']
+                summary_stats.to_excel(writer, sheet_name='Summary_Stats')
+                
+                # Risk segmentation analysis
+                risk_summary = results_df.groupby('risk_category').agg({
+                    'record_id': 'count',
+                    'default_probability': ['mean', 'min', 'max', 'std'],
+                    'risk_score': ['mean', 'min', 'max']
+                }).round(4)
+                risk_summary.columns = ['Count', 'Avg_Probability', 'Min_Probability', 
+                                      'Max_Probability', 'Std_Probability', 'Avg_Risk_Score', 
+                                      'Min_Risk_Score', 'Max_Risk_Score']
+                risk_summary.to_excel(writer, sheet_name='Risk_Analysis')
+                
+                # Processing metadata
+                processing_metadata = pd.DataFrame([{
+                    'Total_Records': prediction_results['batch_metadata']['total_records'],
+                    'Processing_Start': prediction_results['batch_metadata']['processing_start'],
+                    'Processing_End': prediction_results['batch_metadata']['processing_end'],
+                    'Total_Processing_Time': prediction_results['batch_metadata']['total_processing_time'],
+                    'Model_Version': prediction_results['batch_metadata']['model_version'],
+                    'Batches_Processed': prediction_results['processing_stats']['batches_processed'],
+                    'Average_Batch_Time': np.mean(prediction_results['processing_stats']['processing_times']),
+                    'Max_Memory_Usage_MB': np.max(prediction_results['processing_stats']['memory_usage'])
+                }]).T
+                processing_metadata.columns = ['Value']
+                processing_metadata.to_excel(writer, sheet_name='Processing_Info')
+                
+                # High risk records (top 50)
+                high_risk_records = results_df.nlargest(50, 'default_probability')[
+                    ['record_id', 'default_probability', 'risk_score', 'risk_category']
+                ]
+                high_risk_records.to_excel(writer, sheet_name='High_Risk_Records', index=False)
+            
+            export_paths['excel'] = excel_path
+            logger.info(f"Excel export completed: {excel_path}")
+        
+        # JSON Export with structured data
+        if 'json' in export_formats:
+            json_export_data = {
+                'export_metadata': {
+                    'export_timestamp': datetime.now().isoformat(),
+                    'total_records': len(results_df),
+                    'export_formats': export_formats
+                },
+                'prediction_summary': prediction_results['summary_stats'],
+                'batch_metadata': prediction_results['batch_metadata'],
+                'processing_statistics': prediction_results['processing_stats'],
+                'risk_distribution': {
+                    'low_risk': int(np.sum(results_df['risk_category'] == 'Low Risk')),
+                    'medium_risk': int(np.sum(results_df['risk_category'] == 'Medium Risk')),
+                    'high_risk': int(np.sum(results_df['risk_category'] == 'High Risk'))
+                },
+                'detailed_results': results_df.to_dict('records')
+            }
+            
+            json_path = '/home/user/output/batch_predictions_complete.json'
+            with open(json_path, 'w') as f:
+                json.dump(json_export_data, f, indent=2, ensure_ascii=False)
+            
+            export_paths['json'] = json_path
+            logger.info(f"JSON export completed: {json_path}")
+        
+        # Parquet Export (efficient for large datasets)
+        if 'parquet' in export_formats:
+            try:
+                parquet_path = '/home/user/output/batch_predictions_complete.parquet'
+                results_df.to_parquet(parquet_path, index=False, compression='snappy')
+                export_paths['parquet'] = parquet_path
+                logger.info(f"Parquet export completed: {parquet_path}")
+            except ImportError:
+                logger.warning("Parquet export skipped - pyarrow not available")
+                print("Note: Install pyarrow for Parquet export support")
+        
+        # Create export summary report
+        export_summary = {
+            'export_timestamp': datetime.now().isoformat(),
+            'total_records_exported': len(results_df),
+            'export_formats_completed': list(export_paths.keys()),
+            'file_paths': export_paths,
+            'data_summary': {
+                'columns_exported': len(results_df.columns),
+                'original_features': len(batch_data.columns),
+                'prediction_features_added': len(results_df.columns) - len(batch_data.columns),
+                'risk_distribution': {
+                    'low_risk_count': int(np.sum(results_df['risk_category'] == 'Low Risk')),
+                    'medium_risk_count': int(np.sum(results_df['risk_category'] == 'Medium Risk')),
+                    'high_risk_count': int(np.sum(results_df['risk_category'] == 'High Risk'))
+                }
+            },
+            'quality_metrics': {
+                'default_rate': float(np.mean(results_df['prediction'])),
+                'average_risk_score': float(np.mean(results_df['risk_score'])),
+                'risk_score_std': float(np.std(results_df['risk_score'])),
+                'high_risk_percentage': float(np.mean(results_df['risk_category'] == 'High Risk') * 100)
+            }
+        }
+        
+        # Save export summary
+        summary_path = '/home/user/output/export_summary.json'
+        with open(summary_path, 'w') as f:
+            json.dump(export_summary, f, indent=2, ensure_ascii=False)
+        
+        export_paths['summary'] = summary_path
+        
+        # Generate export completion report
+        logger.info("=" * 60)
+        logger.info("BATCH EXPORT COMPLETION REPORT")
+        logger.info("=" * 60)
+        logger.info(f"Total records exported: {len(results_df):,}")
+        logger.info(f"Export formats completed: {', '.join(export_paths.keys())}")
+        logger.info(f"Default rate: {export_summary['quality_metrics']['default_rate']:.1%}")
+        logger.info(f"High risk records: {export_summary['data_summary']['risk_distribution']['high_risk_count']:,}")
+        logger.info("=" * 60)
+        
+        for format_name, file_path in export_paths.items():
+            if format_name != 'summary':
+                file_size = os.path.getsize(file_path) / (1024 * 1024)  # MB
+                logger.info(f"{format_name.upper()}: {file_path} ({file_size:.2f} MB)")
+        
+        logger.info(f"Export summary: {summary_path}")
+        logger.info("All exports completed successfully!")
+        
+        return export_paths
+        
+    except Exception as e:
+        logger.error(f"Error in batch results export: {str(e)}")
+        
+        # Create error report
+        error_report = {
+            'error_timestamp': datetime.now().isoformat(),
+            'error_message': str(e),
+            'attempted_formats': export_formats,
+            'partial_exports': export_paths if 'export_paths' in locals() else {}
+        }
+        
+        error_path = '/home/user/output/export_error_report.json'
+        with open(error_path, 'w') as f:
+            json.dump(error_report, f, indent=2)
+        
+        logger.error(f"Export error report saved to: {error_path}")
+        raise
+
+# Chunk 7: Batch Processing Component - Environment Setup
+# Complete imports and initialization following established patterns
+
+import os
+import sys
+import json
+import time
+import logging
+import warnings
+from datetime import datetime, timedelta
+from typing import Dict, List, Any, Optional, Union, Tuple
+from pathlib import Path
+
+# Data processing and analysis
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+import joblib
+
+# Visualization and plotting
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+
+# SHAP for model explanations
+try:
+    import shap
+    print("✅ SHAP imported successfully")
+except ImportError:
+    print("Installing SHAP...")
+    os.system("pip install shap --quiet")
+    import shap
+    print("✅ SHAP installed and imported")
+
+# Additional utilities
+import psutil
+import gc
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+import multiprocessing as mp
+from functools import partial
+
+# Suppress warnings for cleaner output
+warnings.filterwarnings('ignore')
+plt.rcParams['font.family'] = ['Arial', 'DejaVu Sans', 'Liberation Sans', 'sans-serif']
+
+# Create comprehensive directory structure
+def setup_chunk7_directories():
+    """Create all necessary directories for Chunk 7 operations."""
+    directories = [
+        '/home/user/output',
+        '/home/user/output/batch_processing',
+        '/home/user/output/batch_processing/uploads',
+        '/home/user/output/batch_processing/processed',
+        '/home/user/output/batch_processing/results',
+        '/home/user/output/batch_processing/models',
+        '/home/user/output/batch_processing/logs',
+        '/home/user/output/batch_processing/exports',
+        '/home/user/output/batch_processing/visualizations',
+        '/home/user/output/batch_processing/shap_explanations',
+        '/home/user/output/batch_processing/performance_reports'
+    ]
+    
+    created_dirs = []
+    for directory in directories:
+        os.makedirs(directory, exist_ok=True)
+        created_dirs.append(directory)
+    
+    return created_dirs
+
+# Setup directories
+created_directories = setup_chunk7_directories()
+print("📁 Directory structure created:")
+for directory in created_directories:
+    print(f"  ✓ {directory}")
+
+# Configure comprehensive logging system
+def setup_chunk7_logging():
+    """Setup comprehensive logging for Chunk 7 batch processing."""
+    
+    # Create formatters
+    detailed_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+    )
+    
+    simple_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s'
+    )
+    
+    # Setup main logger
+    logger = logging.getLogger('chunk7_batch_processing')
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()  # Clear any existing handlers
+    
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(simple_formatter)
+    logger.addHandler(console_handler)
+    
+    # File handler for detailed logs
+    log_file = '/home/user/output/batch_processing/logs/chunk7_detailed.log'
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(detailed_formatter)
+    logger.addHandler(file_handler)
+    
+    # Error-specific handler
+    error_log_file = '/home/user/output/batch_processing/logs/chunk7_errors.log'
+    error_handler = logging.FileHandler(error_log_file)
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(detailed_formatter)
+    logger.addHandler(error_handler)
+    
+    return logger
+
+# Initialize logger
+logger = setup_chunk7_logging()
+logger.info("🚀 Chunk 7: Batch Processing Component - Environment Initialized")
+logger.info(f"Python version: {sys.version}")
+logger.info(f"Working directory: {os.getcwd()}")
+
+# System information logging
+system_info = {
+    'cpu_count': psutil.cpu_count(),
+    'memory_gb': round(psutil.virtual_memory().total / (1024**3), 2),
+    'disk_free_gb': round(psutil.disk_usage('/').free / (1024**3), 2),
+    'python_version': sys.version,
+    'timestamp': datetime.now().isoformat()
+}
+
+logger.info(f"System Info - CPU Cores: {system_info['cpu_count']}, "
+           f"Memory: {system_info['memory_gb']}GB, "
+           f"Disk Free: {system_info['disk_free_gb']}GB")
+
+# Save system information
+with open('/home/user/output/batch_processing/logs/system_info.json', 'w') as f:
+    json.dump(system_info, f, indent=2)
+
+# Initialize configuration for batch processing
+batch_config = {
+    'version': '1.0.0',
+    'chunk_id': 7,
+    'component_name': 'Batch Processing Component',
+    'initialization_time': datetime.now().isoformat(),
+    'default_batch_size': 1000,
+    'max_batch_size': 5000,
+    'default_n_jobs': max(1, psutil.cpu_count() - 1),
+    'memory_threshold_mb': system_info['memory_gb'] * 1024 * 0.8,  # 80% of available memory
+    'supported_file_formats': ['csv', 'xlsx', 'json', 'parquet'],
+    'export_formats': ['csv', 'excel', 'json', 'parquet'],
+    'visualization_formats': ['png', 'pdf', 'html'],
+    'model_formats': ['joblib', 'pickle'],
+    'directories': {
+        'base': '/home/user/output/batch_processing',
+        'uploads': '/home/user/output/batch_processing/uploads',
+        'processed': '/home/user/output/batch_processing/processed',
+        'results': '/home/user/output/batch_processing/results',
+        'models': '/home/user/output/batch_processing/models',
+        'exports': '/home/user/output/batch_processing/exports',
+        'visualizations': '/home/user/output/batch_processing/visualizations',
+        'logs': '/home/user/output/batch_processing/logs'
+    }
+}
+
+# Save configuration
+config_path = '/home/user/output/batch_processing/chunk7_config.json'
+with open(config_path, 'w') as f:
+    json.dump(batch_config, f, indent=2, ensure_ascii=False)
+
+logger.info(f"Configuration saved to: {config_path}")
+
+# Create sample model for testing (if not exists)
+def create_sample_model():
+    """Create a sample credit default model for testing batch processing."""
+    model_path = '/home/user/output/batch_processing/models/credit_model.joblib'
+    
+    if not os.path.exists(model_path):
+        logger.info("Creating sample credit default model for testing...")
+        
+        # Generate sample training data
+        np.random.seed(42)
+        n_samples = 1000
+        n_features = 10
+        
+        # Create feature names
+        feature_names = [f'feature_{i+1}' for i in range(n_features)]
+        
+        # Generate synthetic credit data
+        X = np.random.randn(n_samples, n_features)
+        
+        # Create realistic credit default labels (30% default rate)
+        # Higher values in certain features increase default probability
+        default_prob = 1 / (1 + np.exp(-(X[:, 0] * 0.5 + X[:, 1] * 0.3 + X[:, 2] * 0.2 - 0.5)))
+        y = np.random.binomial(1, default_prob)
+        
+        # Train model
+        model = RandomForestClassifier(n_estimators=100, random_state=42)
+        model.fit(X, y)
+        
+        # Save model
+        joblib.dump(model, model_path)
+        
+        # Save feature names
+        feature_info = {
+            'feature_names': feature_names,
+            'n_features': n_features,
+            'model_type': 'RandomForestClassifier',
+            'creation_date': datetime.now().isoformat(),
+            'training_samples': n_samples,
+            'default_rate': float(np.mean(y))
+        }
+        
+        feature_path = '/home/user/output/batch_processing/models/feature_info.json'
+        with open(feature_path, 'w') as f:
+            json.dump(feature_info, f, indent=2)
+        
+        logger.info(f"Sample model created and saved to: {model_path}")
+        logger.info(f"Feature info saved to: {feature_path}")
+        logger.info(f"Model trained on {n_samples} samples with {float(np.mean(y)):.1%} default rate")
+        
+        return model, feature_names
+    else:
+        logger.info(f"Model already exists at: {model_path}")
+        model = joblib.load(model_path)
+        
+        # Load feature info
+        feature_path = '/home/user/output/batch_processing/models/feature_info.json'
+        if os.path.exists(feature_path):
+            with open(feature_path, 'r') as f:
+                feature_info = json.load(f)
+            feature_names = feature_info['feature_names']
+        else:
+            feature_names = [f'feature_{i+1}' for i in range(10)]
+        
+        return model, feature_names
+
+# Initialize sample model
+sample_model, feature_names = create_sample_model()
+
+# Performance monitoring setup
+def initialize_performance_monitoring():
+    """Initialize performance monitoring for batch processing."""
+    monitoring_config = {
+        'start_time': datetime.now().isoformat(),
+        'memory_monitoring': True,
+        'cpu_monitoring': True,
+        'processing_time_tracking': True,
+        'batch_size_optimization': True,
+        'error_tracking': True,
+        'quality_metrics': True
+    }
+    
+    monitoring_path = '/home/user/output/batch_processing/performance_monitoring.json'
+    with open(monitoring_path, 'w') as f:
+        json.dump(monitoring_config, f, indent=2)
+    
+    logger.info("Performance monitoring initialized")
+    return monitoring_config
+
+# Initialize monitoring
+monitoring_config = initialize_performance_monitoring()
+
+# Validation functions for environment
+def validate_environment():
+    """Validate that all required components are properly initialized."""
+    validation_results = {
+        'timestamp': datetime.now().isoformat(),
+        'validations': {}
+    }
+    
+    # Check directories
+    required_dirs = [
+        '/home/user/output/batch_processing',
+        '/home/user/output/batch_processing/models'
+    ]
+    
+    for directory in required_dirs:
+        exists = os.path.exists(directory)
+        validation_results['validations'][f'directory_{directory}'] = exists
+        if not exists:
+            logger.error(f"Required directory missing: {directory}")
+    
+    # Check model
+    model_path = '/home/user/output/batch_processing/models/credit_model.joblib'
+    model_exists = os.path.exists(model_path)
+    validation_results['validations']['sample_model'] = model_exists
+    
+    # Check imports
+    required_modules = ['pandas', 'numpy', 'sklearn', 'matplotlib', 'shap', 'joblib']
+    for module in required_modules:
+        try:
+            __import__(module)
+            validation_results['validations'][f'import_{module}'] = True
+        except ImportError:
+            validation_results['validations'][f'import_{module}'] = False
+            logger.error(f"Required module not available: {module}")
+    
+    # Check system resources
+    validation_results['validations']['sufficient_memory'] = system_info['memory_gb'] >= 2.0
+    validation_results['validations']['sufficient_cpu'] = system_info['cpu_count'] >= 1
+    validation_results['validations']['sufficient_disk'] = system_info['disk_free_gb'] >= 1.0
+    
+    # Overall validation
+    all_passed = all(validation_results['validations'].values())
+    validation_results['overall_status'] = 'PASSED' if all_passed else 'FAILED'
+    
+    # Save validation results
+    validation_path = '/home/user/output/batch_processing/environment_validation.json'
+    with open(validation_path, 'w') as f:
+        json.dump(validation_results, f, indent=2)
+    
+    if all_passed:
+        logger.info("✅ Environment validation PASSED - All components ready")
+    else:
+        logger.error("❌ Environment validation FAILED - Check validation report")
+        failed_checks = [k for k, v in validation_results['validations'].items() if not v]
+        logger.error(f"Failed checks: {failed_checks}")
+    
+    return validation_results
+
+# Run environment validation
+validation_results = validate_environment()
+
+# Final initialization summary
+logger.info("=" * 60)
+logger.info("CHUNK 7 ENVIRONMENT INITIALIZATION COMPLETE")
+logger.info("=" * 60)
+logger.info(f"✅ Directories created: {len(created_directories)}")
+logger.info(f"✅ Logging system: Active with 3 handlers")
+logger.info(f"✅ Sample model: Available at /home/user/output/batch_processing/models/")
+logger.info(f"✅ Configuration: Saved to chunk7_config.json")
+logger.info(f"✅ System resources: {system_info['cpu_count']} CPUs, {system_info['memory_gb']}GB RAM")
+logger.info(f"✅ Validation status: {validation_results['overall_status']}")
+logger.info("=" * 60)
+logger.info("Ready for Chunk 7 batch processing implementation!")
+
+print("\n🎉 Chunk 7 environment setup completed successfully!")
+print(f"📊 System: {system_info['cpu_count']} CPUs, {system_info['memory_gb']}GB RAM")
+print(f"📁 Base directory: /home/user/output/batch_processing/")
+print(f"🤖 Sample model: Ready for batch predictions")
+print(f"📝 Logs: Available in /home/user/output/batch_processing/logs/")
+print("🚀 Environment ready for batch processing implementation!")
+
+        
+        
+def configure_batch_upload_settings(
+    max_file_size_mb: int = 100,
+    allowed_formats: List[str] = None,
+    batch_size_limit: int = 10000,
+    validation_rules: Dict[str, Any] = None
+) -> Dict[str, Any]:
+    """
+    Configure comprehensive batch upload settings and validation rules.
+    
+    Args:
+        max_file_size_mb: Maximum file size in MB
+        allowed_formats: List of allowed file formats
+        batch_size_limit: Maximum number of records per batch
+        validation_rules: Custom validation rules dictionary
+    
+    Returns:
+        Dictionary containing complete upload configuration
+    """
+    try:
+        logger.info("Configuring batch upload settings")
+        
+        # Default allowed formats if not specified
+        if allowed_formats is None:
+            allowed_formats = ['csv', 'xlsx', 'xls', 'json', 'parquet', 'tsv']
+        
+        # Default validation rules
+        if validation_rules is None:
+            validation_rules = {
+                'required_columns': [],
+                'numeric_columns': [],
+                'date_columns': [],
+                'categorical_columns': {},
+                'null_tolerance': 0.1,  # 10% null values allowed
+                'duplicate_tolerance': 0.05  # 5% duplicates allowed
+            }
+        
+        # Create comprehensive configuration
+        upload_config = {
+            'configuration_id': f"batch_config_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            'creation_timestamp': datetime.now().isoformat(),
+            'file_settings': {
+                'max_file_size_mb': max_file_size_mb,
+                'max_file_size_bytes': max_file_size_mb * 1024 * 1024,
+                'allowed_formats': allowed_formats,
+                'encoding_options': ['utf-8', 'latin-1', 'cp1252'],
+                'delimiter_options': [',', ';', '\t', '|'],
+                'compression_support': ['gzip', 'zip', 'bz2']
+            },
+            'batch_settings': {
+                'batch_size_limit': batch_size_limit,
+                'min_batch_size': 10,
+                'auto_chunking': True,
+                'parallel_processing': True,
+                'memory_optimization': True
+            },
+            'validation_rules': validation_rules,
+            'upload_directories': {
+                'incoming': '/home/user/output/batch_processing/uploads/incoming',
+                'processing': '/home/user/output/batch_processing/uploads/processing',
+                'validated': '/home/user/output/batch_processing/uploads/validated',
+                'rejected': '/home/user/output/batch_processing/uploads/rejected',
+                'archived': '/home/user/output/batch_processing/uploads/archived'
+            },
+            'quality_thresholds': {
+                'min_data_quality_score': 0.8,
+                'max_null_percentage': validation_rules['null_tolerance'] * 100,
+                'max_duplicate_percentage': validation_rules['duplicate_tolerance'] * 100,
+                'min_records_required': 10
+            },
+            'processing_options': {
+                'auto_type_inference': True,
+                'handle_missing_values': True,
+                'standardize_column_names': True,
+                'remove_duplicates': True,
+                'validate_data_types': True
+            }
+        }
+        
+        # Create upload directories
+        for dir_name, dir_path in upload_config['upload_directories'].items():
+            os.makedirs(dir_path, exist_ok=True)
+            logger.info(f"Created directory: {dir_path}")
+        
+        # Save configuration
+        config_path = '/home/user/output/batch_processing/batch_upload_config.json'
+        with open(config_path, 'w') as f:
+            json.dump(upload_config, f, indent=2, ensure_ascii=False)
+        
+        # Create configuration summary
+        summary = {
+            'max_file_size': f"{max_file_size_mb}MB",
+            'supported_formats': len(allowed_formats),
+            'batch_limit': f"{batch_size_limit:,} records",
+            'directories_created': len(upload_config['upload_directories']),
+            'validation_rules_count': len(validation_rules)
+        }
+        
+        logger.info(f"Batch upload configuration created successfully")
+        logger.info(f"Configuration saved to: {config_path}")
+        logger.info(f"Summary: {summary}")
+        
+        return upload_config
+        
+    except Exception as e:
+        logger.error(f"Error configuring batch upload settings: {str(e)}")
+        raise
+
+# Test the function
+print("🧪 Testing configure_batch_upload_settings function...")
+
+try:
+    # Test with default parameters
+    config = configure_batch_upload_settings()
+    print(f"✅ Default configuration created with ID: {config['configuration_id']}")
+    print(f"   Max file size: {config['file_settings']['max_file_size_mb']}MB")
+    print(f"   Allowed formats: {config['file_settings']['allowed_formats']}")
+    print(f"   Directories created: {len(config['upload_directories'])}")
+    
+    # Test with custom parameters
+    custom_config = configure_batch_upload_settings(
+        max_file_size_mb=50,
+        allowed_formats=['csv', 'xlsx', 'json'],
+        batch_size_limit=5000,
+        validation_rules={
+            'required_columns': ['customer_id', 'amount'],
+            'numeric_columns': ['amount', 'credit_score'],
+            'null_tolerance': 0.05,
+            'duplicate_tolerance': 0.02
+        }
+    )
+    print(f"✅ Custom configuration created with ID: {custom_config['configuration_id']}")
+    print(f"   Custom max file size: {custom_config['file_settings']['max_file_size_mb']}MB")
+    print(f"   Custom formats: {custom_config['file_settings']['allowed_formats']}")
+    print(f"   Custom batch limit: {custom_config['batch_settings']['batch_size_limit']:,}")
+    
+    # Verify configuration file was saved
+    config_path = '/home/user/output/batch_processing/batch_upload_config.json'
+    if os.path.exists(config_path):
+        file_size = os.path.getsize(config_path)
+        print(f"✅ Configuration file saved: {config_path} ({file_size} bytes)")
+    else:
+        print(f"❌ Configuration file not found: {config_path}")
+    
+    print("🎉 configure_batch_upload_settings function test completed successfully!")
+    
+except Exception as e:
+    print(f"❌ Function test failed: {e}")
+    import traceback
+    traceback.print_exc()
+
+def validate_uploaded_file(
+    file_path: str,
+    upload_config: Dict[str, Any],
+    perform_deep_validation: bool = True
+) -> Dict[str, Any]:
+    """
+    Comprehensive validation of uploaded batch files against configuration rules.
+    
+    Args:
+        file_path: Path to the uploaded file
+        upload_config: Upload configuration dictionary
+        perform_deep_validation: Whether to perform detailed data validation
+    
+    Returns:
+        Dictionary containing validation results and recommendations
+    """
+    try:
+        logger.info(f"Validating uploaded file: {file_path}")
+        
+        validation_result = {
+            'file_path': file_path,
+            'validation_timestamp': datetime.now().isoformat(),
+            'validation_status': 'PENDING',
+            'file_info': {},
+            'format_validation': {},
+            'size_validation': {},
+            'content_validation': {},
+            'quality_metrics': {},
+            'recommendations': [],
+            'errors': [],
+            'warnings': []
+        }
+        
+        # Check if file exists
+        if not os.path.exists(file_path):
+            validation_result['validation_status'] = 'FAILED'
+            validation_result['errors'].append(f"File not found: {file_path}")
+            return validation_result
+        
+        # Get file information
+        file_stats = os.stat(file_path)
+        file_size_mb = file_stats.st_size / (1024 * 1024)
+        file_extension = Path(file_path).suffix.lower().lstrip('.')
+        
+        validation_result['file_info'] = {
+            'filename': os.path.basename(file_path),
+            'file_size_mb': round(file_size_mb, 2),
+            'file_size_bytes': file_stats.st_size,
+            'file_extension': file_extension,
+            'last_modified': datetime.fromtimestamp(file_stats.st_mtime).isoformat()
+        }
+        
+        # Format validation
+        allowed_formats = upload_config['file_settings']['allowed_formats']
+        format_valid = file_extension in allowed_formats
+        
+        validation_result['format_validation'] = {
+            'is_valid': format_valid,
+            'detected_format': file_extension,
+            'allowed_formats': allowed_formats
+        }
+        
+        if not format_valid:
+            validation_result['errors'].append(
+                f"Unsupported file format: {file_extension}. "
+                f"Allowed formats: {', '.join(allowed_formats)}"
+            )
+        
+        # Size validation
+        max_size_mb = upload_config['file_settings']['max_file_size_mb']
+        size_valid = file_size_mb <= max_size_mb
+        
+        validation_result['size_validation'] = {
+            'is_valid': size_valid,
+            'file_size_mb': file_size_mb,
+            'max_allowed_mb': max_size_mb,
+            'size_percentage': (file_size_mb / max_size_mb) * 100
+        }
+        
+        if not size_valid:
+            validation_result['errors'].append(
+                f"File size ({file_size_mb:.2f}MB) exceeds limit ({max_size_mb}MB)"
+            )
+        
+        # Content validation (if format and size are valid)
+        if format_valid and size_valid and perform_deep_validation:
+            try:
+                # Load data based on file format
+                if file_extension == 'csv':
+                    df = pd.read_csv(file_path, nrows=1000)  # Sample for validation
+                elif file_extension in ['xlsx', 'xls']:
+                    df = pd.read_excel(file_path, nrows=1000)
+                elif file_extension == 'json':
+                    df = pd.read_json(file_path, lines=True, nrows=1000)
+                elif file_extension == 'parquet':
+                    df = pd.read_parquet(file_path)
+                    if len(df) > 1000:
+                        df = df.head(1000)
+                elif file_extension == 'tsv':
+                    df = pd.read_csv(file_path, sep='\t', nrows=1000)
+                else:
+                    df = None
+                
+                if df is not None:
+                    # Basic content validation
+                    validation_result['content_validation'] = {
+                        'readable': True,
+                        'row_count_sample': len(df),
+                        'column_count': len(df.columns),
+                        'column_names': df.columns.tolist(),
+                        'data_types': df.dtypes.astype(str).to_dict(),
+                        'null_counts': df.isnull().sum().to_dict(),
+                        'duplicate_rows': int(df.duplicated().sum())
+                    }
+                    
+                    # Quality metrics calculation
+                    total_cells = len(df) * len(df.columns)
+                    null_cells = df.isnull().sum().sum()
+                    null_percentage = (null_cells / total_cells) * 100 if total_cells > 0 else 0
+                    duplicate_percentage = (df.duplicated().sum() / len(df)) * 100 if len(df) > 0 else 0
+                    
+                    validation_result['quality_metrics'] = {
+                        'data_quality_score': max(0, 1 - (null_percentage + duplicate_percentage) / 100),
+                        'null_percentage': round(null_percentage, 2),
+                        'duplicate_percentage': round(duplicate_percentage, 2),
+                        'completeness_score': round((1 - null_percentage / 100) * 100, 2),
+                        'uniqueness_score': round((1 - duplicate_percentage / 100) * 100, 2)
+                    }
+                    
+                    # Advanced validation checks
+                    validation_rules = upload_config.get('validation_rules', {})
+                    
+                    # Check required columns
+                    required_columns = validation_rules.get('required_columns', [])
+                    missing_columns = [col for col in required_columns if col not in df.columns]
+                    if missing_columns:
+                        validation_result['errors'].append(
+                            f"Missing required columns: {', '.join(missing_columns)}"
+                        )
+                    
+                    # Check numeric columns
+                    numeric_columns = validation_rules.get('numeric_columns', [])
+                    for col in numeric_columns:
+                        if col in df.columns:
+                            non_numeric_count = pd.to_numeric(df[col], errors='coerce').isnull().sum()
+                            if non_numeric_count > 0:
+                                validation_result['warnings'].append(
+                                    f"Column '{col}' has {non_numeric_count} non-numeric values"
+                                )
+                    
+                    # Check categorical columns
+                    categorical_columns = validation_rules.get('categorical_columns', {})
+                    for col, allowed_values in categorical_columns.items():
+                        if col in df.columns:
+                            invalid_values = df[~df[col].isin(allowed_values)][col].unique()
+                            if len(invalid_values) > 0:
+                                validation_result['warnings'].append(
+                                    f"Column '{col}' has invalid values: {list(invalid_values)[:5]}"
+                                )
+                    
+                    # Check against quality thresholds
+                    quality_thresholds = upload_config['quality_thresholds']
+                    
+                    if null_percentage > quality_thresholds['max_null_percentage']:
+                        validation_result['warnings'].append(
+                            f"High null percentage: {null_percentage:.1f}% "
+                            f"(threshold: {quality_thresholds['max_null_percentage']}%)"
+                        )
+                    
+                    if duplicate_percentage > quality_thresholds['max_duplicate_percentage']:
+                        validation_result['warnings'].append(
+                            f"High duplicate percentage: {duplicate_percentage:.1f}% "
+                            f"(threshold: {quality_thresholds['max_duplicate_percentage']}%)"
+                        )
+                    
+                    if len(df) < quality_thresholds['min_records_required']:
+                        validation_result['warnings'].append(
+                            f"Low record count: {len(df)} "
+                            f"(minimum: {quality_thresholds['min_records_required']})"
+                        )
+                    
+                    # Data type analysis
+                    type_analysis = {
+                        'numeric_columns': len(df.select_dtypes(include=[np.number]).columns),
+                        'text_columns': len(df.select_dtypes(include=['object']).columns),
+                        'datetime_columns': len(df.select_dtypes(include=['datetime64']).columns),
+                        'boolean_columns': len(df.select_dtypes(include=['bool']).columns)
+                    }
+                    validation_result['content_validation']['type_analysis'] = type_analysis
+                    
+                    # Memory usage analysis
+                    memory_usage_mb = df.memory_usage(deep=True).sum() / (1024 * 1024)
+                    validation_result['content_validation']['memory_usage_mb'] = round(memory_usage_mb, 2)
+                    
+                    # Sample data preview
+                    validation_result['content_validation']['sample_data'] = {
+                        'first_5_rows': df.head().to_dict('records'),
+                        'column_samples': {col: df[col].dropna().head(3).tolist() for col in df.columns[:5]}
+                    }
+                
+            except Exception as content_error:
+                validation_result['content_validation'] = {
+                    'readable': False,
+                    'error': str(content_error)
+                }
+                validation_result['errors'].append(f"Content validation failed: {str(content_error)}")
+        
+        # Generate recommendations
+        if validation_result['warnings']:
+            validation_result['recommendations'].extend([
+                "Consider data cleaning before batch processing",
+                "Review data quality and completeness",
+                "Validate source data collection process"
+            ])
+        
+        if file_size_mb > max_size_mb * 0.8:  # 80% of limit
+            validation_result['recommendations'].append(
+                "Consider splitting large files into smaller batches for better performance"
+            )
+        
+        if validation_result['content_validation'].get('memory_usage_mb', 0) > 100:
+            validation_result['recommendations'].append(
+                "Large memory usage detected - consider data type optimization"
+            )
+        
+        # Performance recommendations
+        if validation_result['content_validation'].get('row_count_sample', 0) > 5000:
+            validation_result['recommendations'].append(
+                "Large dataset detected - enable parallel processing for better performance"
+            )
+        
+        # Determine final validation status
+        if validation_result['errors']:
+            validation_result['validation_status'] = 'FAILED'
+        elif validation_result['warnings']:
+            validation_result['validation_status'] = 'PASSED_WITH_WARNINGS'
+        else:
+            validation_result['validation_status'] = 'PASSED'
+        
+        # Save validation report
+        os.makedirs('/home/user/output/batch_processing/uploads/validation_reports', exist_ok=True)
+        report_filename = f"validation_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        report_path = f"/home/user/output/batch_processing/uploads/validation_reports/{report_filename}"
+        
+        with open(report_path, 'w') as f:
+            json.dump(validation_result, f, indent=2, ensure_ascii=False)
+        
+        validation_result['validation_report_path'] = report_path
+        
+        logger.info(f"File validation completed: {validation_result['validation_status']}")
+        logger.info(f"Validation report saved to: {report_path}")
+        
+        return validation_result
+        
+    except Exception as e:
+        logger.error(f"Error validating file {file_path}: {str(e)}")
+        validation_result['validation_status'] = 'ERROR'
+        validation_result['errors'].append(f"Validation process error: {str(e)}")
+        return validation_result
+
+
+# Test the validate_uploaded_file function
+print("🧪 Testing validate_uploaded_file function...")
+
+try:
+    # Create sample test data with various quality issues
+    test_data = pd.DataFrame({
+        'customer_id': list(range(1, 101)) + [1, 2],  # Add duplicates
+        'amount': [np.random.uniform(100, 5000) if i % 10 != 0 else np.nan for i in range(102)],  # Add nulls
+        'credit_score': np.random.randint(300, 850, 102),
+        'age': np.random.randint(18, 80, 102),
+        'income': np.random.uniform(20000, 150000, 102),
+        'category': np.random.choice(['A', 'B', 'C', 'Invalid'], 102)  # Add invalid category
+    })
+    
+    # Save test file
+    test_file_path = '/home/user/output/batch_processing/test_validation_file.csv'
+    test_data.to_csv(test_file_path, index=False)
+    
+    # Load upload configuration (should exist from previous function test)
+    config_path = '/home/user/output/batch_processing/batch_upload_config.json'
+    if os.path.exists(config_path):
+        with open(config_path, 'r') as f:
+            upload_config = json.load(f)
+    else:
+        # Create minimal config for testing
+        upload_config = {
+            'file_settings': {
+                'max_file_size_mb': 50,
+                'allowed_formats': ['csv', 'xlsx', 'json']
+            },
+            'validation_rules': {
+                'required_columns': ['customer_id', 'amount'],
+                'numeric_columns': ['amount', 'credit_score'],
+                'categorical_columns': {'category': ['A', 'B', 'C']},
+                'null_tolerance': 0.05,
+                'duplicate_tolerance': 0.02
+            },
+            'quality_thresholds': {
+                'max_null_percentage': 5.0,
+                'max_duplicate_percentage': 2.0,
+                'min_records_required': 10
+            }
+        }
+    
+    # Test validation
+    validation_result = validate_uploaded_file(
+        test_file_path, 
+        upload_config, 
+        perform_deep_validation=True
+    )
+    
+    print(f"✅ File validation completed: {validation_result['validation_status']}")
+    print(f"   File: {validation_result['file_info']['filename']}")
+    print(f"   Size: {validation_result['file_info']['file_size_mb']}MB")
+    print(f"   Format: {validation_result['format_validation']['detected_format']}")
+    print(f"   Format valid: {validation_result['format_validation']['is_valid']}")
+    print(f"   Size valid: {validation_result['size_validation']['is_valid']}")
+    
+    if 'content_validation' in validation_result:
+        content = validation_result['content_validation']
+        print(f"   Readable: {content['readable']}")
+        if content['readable']:
+            print(f"   Rows: {content['row_count_sample']}")
+            print(f"   Columns: {content['column_count']}")
+            print(f"   Duplicates: {content['duplicate_rows']}")
+            print(f"   Memory usage: {content.get('memory_usage_mb', 0):.2f}MB")
+    
+    if 'quality_metrics' in validation_result:
+        quality = validation_result['quality_metrics']
+        print(f"   Quality score: {quality['data_quality_score']:.3f}")
+        print(f"   Null percentage: {quality['null_percentage']:.1f}%")
+        print(f"   Duplicate percentage: {quality['duplicate_percentage']:.1f}%")
+        print(f"   Completeness: {quality['completeness_score']:.1f}%")
+        print(f"   Uniqueness: {quality['uniqueness_score']:.1f}%")
+    
+    print(f"   Errors: {len(validation_result['errors'])}")
+    for error in validation_result['errors']:
+        print(f"     ❌ {error}")
+    
+    print(f"   Warnings: {len(validation_result['warnings'])}")
+    for warning in validation_result['warnings']:
+        print(f"     ⚠️ {warning}")
+    
+    print(f"   Recommendations: {len(validation_result['recommendations'])}")
+    for rec in validation_result['recommendations']:
+        print(f"     💡 {rec}")
+    
+    # Verify validation report was saved
+    if 'validation_report_path' in validation_result:
+        report_path = validation_result['validation_report_path']
+        if os.path.exists(report_path):
+            file_size = os.path.getsize(report_path)
+            print(f"✅ Validation report saved: {report_path} ({file_size} bytes)")
+        else:
+            print(f"❌ Validation report not found: {report_path}")
+    
+    print("🎉 validate_uploaded_file function test completed successfully!")
+    
+except Exception as e:
+    print(f"❌ Function test failed: {e}")
+    import traceback
+    traceback.print_exc()
